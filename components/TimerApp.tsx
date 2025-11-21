@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { supabase } from '@/lib/supabase'; // @ 별명으로 수정됨
+import { supabase } from '@/lib/supabase';
 
 const formatTime = (seconds: number) => {
   const h = Math.floor(seconds / 3600);
@@ -19,40 +19,41 @@ export default function TimerApp() {
   const [mode, setMode] = useState<'pomo' | 'stopwatch'>('pomo');
   const [isSaving, setIsSaving] = useState(false);
 
-  // --- 💾 DB 저장 함수 (업데이트: 사용자 ID 추가!) ---
+  // --- 🔊 소리 재생 함수 (새로 추가됨!) ---
+  const playAlarm = () => {
+    try {
+      // public 폴더에 있는 alarm.mp3를 재생합니다
+      const audio = new Audio('/alarm.mp3');
+      audio.play();
+    } catch (error) {
+      console.error('소리 재생 실패:', error);
+    }
+  };
+
+  // --- 💾 DB 저장 함수 ---
   const saveRecord = async (recordMode: string, duration: number) => {
     if (duration < 10) {
-      alert('10초 미만은 기록되지 않아요!');
+      // alert("10초 미만은 기록되지 않아요!"); // 테스트할 때 귀찮으니 주석 처리
       return;
     }
 
     setIsSaving(true);
     try {
-      // 1. 현재 로그인한 사용자 정보 가져오기
       const {
         data: { user },
       } = await supabase.auth.getUser();
+      if (!user) return;
 
-      if (!user) {
-        alert('로그인이 필요합니다!');
-        return;
-      }
-
-      // 2. 데이터 저장 (user_id 포함)
       const { error } = await supabase.from('study_sessions').insert({
         mode: recordMode,
         duration: duration,
-        user_id: user.id, // 👈 여기가 핵심! 내 아이디를 같이 저장함
+        user_id: user.id,
       });
 
       if (error) throw error;
-
-      // 저장 성공하면 화면 새로고침 없이 리스트를 업데이트하고 싶지만,
-      // 일단은 알림만 띄웁니다. (나중에 자동 갱신 기능 추가 가능)
-      alert('🔥 공부 기록이 저장되었습니다!');
+      // alert("🔥 공부 기록 저장 완료!"); // 소리랑 겹치니 알림창은 일단 뺍니다
     } catch (e) {
       console.error(e);
-      alert('저장에 실패했습니다.');
     } finally {
       setIsSaving(false);
     }
@@ -73,10 +74,14 @@ export default function TimerApp() {
       pomoRef.current = setInterval(() => {
         setPomoTime((prev) => {
           if (prev <= 1) {
+            // 시간이 다 됐을 때!
             if (pomoRef.current) clearInterval(pomoRef.current);
             setIsPomoRunning(false);
-            alert('집중 끝! 휴식하세요.');
-            saveRecord('pomo', initialPomoTime);
+
+            playAlarm(); // 🔊 삐빕! 소리 재생
+            alert('⏰ 집중 시간이 끝났습니다!'); // 알림창 띄우기
+
+            saveRecord('pomo', initialPomoTime); // 자동 저장
             return 0;
           }
           return prev - 1;
@@ -118,6 +123,7 @@ export default function TimerApp() {
     setStopwatchTime(0);
     setIsStopwatchRunning(false);
     if (stopwatchRef.current) clearInterval(stopwatchRef.current);
+    alert('🔥 스톱워치 기록 저장 완료!');
   };
 
   const resetStopwatch = () => {
@@ -177,6 +183,7 @@ export default function TimerApp() {
               >
                 ☕ 휴식 (5분)
               </button>
+              {/* 테스트용 버튼 (5초) */}
               <button
                 onClick={() => setPomoDuration(0.1)}
                 className="px-3 py-1 rounded-full text-sm border border-red-900 text-red-500 hover:bg-red-900 transition-colors"
