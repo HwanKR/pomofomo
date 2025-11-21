@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 
-// 데이터 모양 정의 (TypeScript가 좋아합니다)
 type StudySession = {
   id: number;
   mode: string;
@@ -15,22 +14,25 @@ export default function HistoryList() {
   const [history, setHistory] = useState<StudySession[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // DB에서 데이터 가져오는 함수
   const fetchHistory = async () => {
     try {
-      // 1. 내 아이디 찾기
+      setLoading(true);
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      if (!user) return;
 
-      // 2. 내 아이디랑 일치하는 기록만 가져오기 (최신순 정렬)
+      // 로그인 안 했으면 데이터 요청 자체를 안 함
+      if (!user) {
+        setLoading(false);
+        return;
+      }
+
       const { data, error } = await supabase
         .from('study_sessions')
         .select('*')
-        .eq('user_id', user.id) // 내 꺼만!
-        .order('created_at', { ascending: false }) // 최신순
-        .limit(10); // 최근 10개만
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(10);
 
       if (error) throw error;
       if (data) setHistory(data);
@@ -41,19 +43,16 @@ export default function HistoryList() {
     }
   };
 
-  // 컴포넌트가 화면에 뜰 때 실행
   useEffect(() => {
     fetchHistory();
   }, []);
 
-  // 시간을 예쁘게 (몇 분 몇 초)
   const formatDuration = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
     return `${m}분 ${s}초`;
   };
 
-  // 날짜를 예쁘게 (2024.01.01)
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
     return `${
@@ -78,7 +77,9 @@ export default function HistoryList() {
 
       <div className="bg-gray-800 rounded-2xl p-4 shadow-xl border border-gray-700">
         {loading ? (
-          <div className="text-center text-gray-500 py-4">로딩 중...</div>
+          <div className="text-center text-gray-500 py-4">
+            기록을 불러오는 중...
+          </div>
         ) : history.length === 0 ? (
           <div className="text-center text-gray-500 py-4">
             아직 기록이 없어요. <br /> 공부를 시작해보세요!

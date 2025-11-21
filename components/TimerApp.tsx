@@ -21,7 +21,6 @@ export default function TimerApp() {
   const [isSaving, setIsSaving] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
 
-  // --- 상태 변수들 ---
   const [pomoTime, setPomoTime] = useState(25 * 60);
   const [initialPomoTime, setInitialPomoTime] = useState(25 * 60);
   const [isPomoRunning, setIsPomoRunning] = useState(false);
@@ -31,15 +30,19 @@ export default function TimerApp() {
   const [isStopwatchRunning, setIsStopwatchRunning] = useState(false);
   const stopwatchRef = useRef<NodeJS.Timeout | null>(null);
 
-  // --- ☁️ 1. [로드] 서버에서 마지막 상태 가져오기 (알림 삭제됨) ---
+  // --- ☁️ 1. 로드 (로그인 한 사람만) ---
   useEffect(() => {
     const loadServerState = async () => {
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      if (!user) return;
+      // 로그인 안 했으면 서버에서 불러올 것도 없음 -> 그냥 패스
+      if (!user) {
+        setIsLoaded(true);
+        return;
+      }
 
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from('timer_states')
         .select('*')
         .eq('user_id', user.id)
@@ -49,7 +52,6 @@ export default function TimerApp() {
         setPomoTime(data.pomo_time);
         setStopwatchTime(data.stopwatch_time);
         setMode(data.mode as 'pomo' | 'stopwatch');
-        // toast.success("지난 기록을 불러왔습니다."); // 삭제함: 조용히 로드
       }
       setIsLoaded(true);
     };
@@ -57,7 +59,7 @@ export default function TimerApp() {
     loadServerState();
   }, []);
 
-  // --- ☁️ 2. [저장] 상태를 서버에 저장하는 함수 ---
+  // --- ☁️ 2. 동기화 (로그인 한 사람만) ---
   const syncStateToServer = async (
     currentMode: string,
     pTime: number,
@@ -66,7 +68,7 @@ export default function TimerApp() {
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!user) return; // 로그인 안 했으면 조용히 종료
 
     await supabase.from('timer_states').upsert({
       user_id: user.id,
@@ -76,7 +78,6 @@ export default function TimerApp() {
     });
   };
 
-  // --- 🔊 소리 재생 ---
   const playAlarm = () => {
     try {
       const audio = new Audio('/alarm.mp3');
@@ -86,12 +87,23 @@ export default function TimerApp() {
     }
   };
 
-  // --- 💾 DB 저장 (완료 기록) ---
+  // --- 💾 DB 저장 (핵심 수정: 비로그인 시 에러 안 내고 패스) ---
   const saveRecord = async (recordMode: string, duration: number) => {
     if (duration < 10) return;
 
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    // ⭐️ 로그인 안 했으면 여기서 "저장 안 함" 처리하고 끝냄
+    if (!user) {
+      // (선택사항) 사용자에게 저장이 안 됐음을 가볍게 알릴 수도 있고, 그냥 넘어갈 수도 있음
+      // 여기선 깔끔하게 아무것도 안 띄우거나, "로그인하면 기록됨" 힌트만 줄 수 있음
+      return;
+    }
+
     setIsSaving(true);
-    const toastId = toast.loading('완료 기록 저장 중...', {
+    const toastId = toast.loading('기록 저장 중...', {
       style: {
         background: 'rgba(0, 0, 0, 0.8)',
         color: '#fff',
@@ -100,14 +112,6 @@ export default function TimerApp() {
     });
 
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) {
-        toast.error('로그인이 필요합니다.', { id: toastId });
-        return;
-      }
-
       const { error } = await supabase.from('study_sessions').insert({
         mode: recordMode,
         duration: duration,
@@ -126,7 +130,7 @@ export default function TimerApp() {
       });
     } catch (e) {
       console.error(e);
-      toast.error('저장에 실패했습니다.', { id: toastId });
+      toast.error('저장 실패', { id: toastId });
     } finally {
       setIsSaving(false);
     }
@@ -279,7 +283,7 @@ export default function TimerApp() {
 
       <div className="p-8 flex flex-col items-center justify-center min-h-[300px]">
         {!isLoaded ? (
-          <div className="text-gray-500 animate-pulse">동기화 중...</div>
+          <div className="text-gray-500 animate-pulse">준비 중...</div>
         ) : mode === 'pomo' ? (
           <div className="text-center animate-fade-in w-full">
             <div className="mb-6 flex justify-center">
