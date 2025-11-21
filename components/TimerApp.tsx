@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
+import toast from 'react-hot-toast';
 
 const formatTime = (seconds: number) => {
   const h = Math.floor(seconds / 3600);
@@ -19,10 +20,9 @@ export default function TimerApp() {
   const [mode, setMode] = useState<'pomo' | 'stopwatch'>('pomo');
   const [isSaving, setIsSaving] = useState(false);
 
-  // --- 🔊 소리 재생 함수 (새로 추가됨!) ---
+  // --- 🔊 소리 재생 ---
   const playAlarm = () => {
     try {
-      // public 폴더에 있는 alarm.mp3를 재생합니다
       const audio = new Audio('/alarm.mp3');
       audio.play();
     } catch (error) {
@@ -30,19 +30,27 @@ export default function TimerApp() {
     }
   };
 
-  // --- 💾 DB 저장 함수 ---
+  // --- 💾 DB 저장 ---
   const saveRecord = async (recordMode: string, duration: number) => {
-    if (duration < 10) {
-      // alert("10초 미만은 기록되지 않아요!"); // 테스트할 때 귀찮으니 주석 처리
-      return;
-    }
+    if (duration < 10) return;
 
     setIsSaving(true);
+    const toastId = toast.loading('기록 저장 중...', {
+      style: {
+        background: 'rgba(0, 0, 0, 0.8)', // 반투명 검정
+        color: '#fff',
+        backdropFilter: 'blur(10px)', // ✨ 블러 효과
+      },
+    });
+
     try {
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) {
+        toast.error('로그인이 필요합니다!', { id: toastId });
+        return;
+      }
 
       const { error } = await supabase.from('study_sessions').insert({
         mode: recordMode,
@@ -51,9 +59,18 @@ export default function TimerApp() {
       });
 
       if (error) throw error;
-      // alert("🔥 공부 기록 저장 완료!"); // 소리랑 겹치니 알림창은 일단 뺍니다
+
+      toast.success('🔥 공부 기록 저장 완료!', {
+        id: toastId,
+        style: {
+          background: 'rgba(0, 0, 0, 0.8)',
+          color: '#fff',
+          backdropFilter: 'blur(10px)',
+        },
+      });
     } catch (e) {
       console.error(e);
+      toast.error('저장에 실패했습니다.', { id: toastId });
     } finally {
       setIsSaving(false);
     }
@@ -65,25 +82,55 @@ export default function TimerApp() {
   const [isPomoRunning, setIsPomoRunning] = useState(false);
   const pomoRef = useRef<NodeJS.Timeout | null>(null);
 
+  // ⭐️ 핵심 수정: 숫자가 0이 되었는지 감시하는 별도의 눈 (useEffect)
+  useEffect(() => {
+    if (pomoTime === 0 && isPomoRunning) {
+      // 1. 타이머 멈춤
+      if (pomoRef.current) clearInterval(pomoRef.current);
+      setIsPomoRunning(false);
+
+      // 2. 소리 재생
+      playAlarm();
+
+      // 3. ✨ 흐림 효과 알림 띄우기 (딱 한 번만 실행됨)
+      toast('⏰ 집중 시간이 끝났습니다! 고생했어요.', {
+        duration: 5000,
+        icon: '👏',
+        style: {
+          background: 'rgba(255, 255, 255, 0.1)', // 아주 투명한 흰색 배경
+          color: '#fff',
+          border: '1px solid rgba(255, 255, 255, 0.2)', // 얇은 테두리
+          backdropFilter: 'blur(12px)', // ✨ 뒤가 흐릿하게 비치는 효과 (Frosted Glass)
+          boxShadow: '0 4px 30px rgba(0, 0, 0, 0.1)', // 그림자
+          borderRadius: '16px', // 둥글게
+          padding: '16px',
+          fontWeight: 'bold',
+        },
+      });
+
+      // 4. 저장
+      saveRecord('pomo', initialPomoTime);
+    }
+  }, [pomoTime, isPomoRunning, initialPomoTime]); // 이 값들이 변할 때만 검사함
+
   const togglePomo = () => {
     if (isPomoRunning) {
       if (pomoRef.current) clearInterval(pomoRef.current);
       setIsPomoRunning(false);
+      toast('잠시 멈췄어요', {
+        icon: '⏸️',
+        style: { background: '#333', color: '#fff' },
+      });
     } else {
       setIsPomoRunning(true);
+      toast('집중 시작! 화이팅 🔥', {
+        icon: '🍅',
+        style: { background: '#333', color: '#fff' },
+      });
+
       pomoRef.current = setInterval(() => {
         setPomoTime((prev) => {
-          if (prev <= 1) {
-            // 시간이 다 됐을 때!
-            if (pomoRef.current) clearInterval(pomoRef.current);
-            setIsPomoRunning(false);
-
-            playAlarm(); // 🔊 삐빕! 소리 재생
-            alert('⏰ 집중 시간이 끝났습니다!'); // 알림창 띄우기
-
-            saveRecord('pomo', initialPomoTime); // 자동 저장
-            return 0;
-          }
+          if (prev <= 0) return 0; // 0 밑으로는 내려가지 않게 방어
           return prev - 1;
         });
       }, 1000);
@@ -95,6 +142,9 @@ export default function TimerApp() {
     setIsPomoRunning(false);
     setPomoTime(minutes * 60);
     setInitialPomoTime(minutes * 60);
+    toast.success(`${minutes === 0.1 ? '5초' : minutes + '분'}으로 설정됨`, {
+      style: { background: '#333', color: '#fff' },
+    });
   };
 
   const resetPomo = () => {
@@ -110,8 +160,16 @@ export default function TimerApp() {
     if (isStopwatchRunning) {
       if (stopwatchRef.current) clearInterval(stopwatchRef.current);
       setIsStopwatchRunning(false);
+      toast('스톱워치 일시정지', {
+        icon: '⏸️',
+        style: { background: '#333', color: '#fff' },
+      });
     } else {
       setIsStopwatchRunning(true);
+      toast('기록 시작!', {
+        icon: '⏱️',
+        style: { background: '#333', color: '#fff' },
+      });
       stopwatchRef.current = setInterval(() => {
         setStopwatchTime((prev) => prev + 1);
       }, 1000);
@@ -123,13 +181,15 @@ export default function TimerApp() {
     setStopwatchTime(0);
     setIsStopwatchRunning(false);
     if (stopwatchRef.current) clearInterval(stopwatchRef.current);
-    alert('🔥 스톱워치 기록 저장 완료!');
   };
 
   const resetStopwatch = () => {
     if (stopwatchRef.current) clearInterval(stopwatchRef.current);
     setIsStopwatchRunning(false);
     setStopwatchTime(0);
+    toast('리셋되었습니다', {
+      style: { background: '#333', color: '#fff' },
+    });
   };
 
   useEffect(() => {
@@ -140,7 +200,8 @@ export default function TimerApp() {
   }, []);
 
   return (
-    <div className="w-full max-w-md bg-gray-800 rounded-3xl shadow-2xl border border-gray-700 overflow-hidden mb-8">
+    <div className="w-full max-w-md bg-gray-800 rounded-3xl shadow-2xl border border-gray-700 overflow-hidden mb-8 transition-all duration-300 hover:shadow-red-900/10">
+      {/* 상단 탭 */}
       <div className="flex border-b border-gray-700">
         <button
           onClick={() => setMode('pomo')}
@@ -167,9 +228,30 @@ export default function TimerApp() {
       <div className="p-8 flex flex-col items-center justify-center min-h-[300px]">
         {mode === 'pomo' ? (
           <div className="text-center animate-fade-in w-full">
-            <div className="text-7xl font-bold text-red-400 mb-8 font-mono tabular-nums tracking-tighter">
+            {/* ✨ 상태 배지 */}
+            <div className="mb-6 flex justify-center">
+              {isPomoRunning ? (
+                <span className="px-4 py-1 rounded-full bg-red-500/20 text-red-400 text-sm font-bold border border-red-500/50 animate-pulse flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-red-500"></span>
+                  🔥 집중하는 중
+                </span>
+              ) : (
+                <span className="px-4 py-1 rounded-full bg-gray-700 text-gray-400 text-sm font-medium border border-gray-600">
+                  💤 대기 중
+                </span>
+              )}
+            </div>
+
+            <div
+              className={`text-7xl font-bold mb-8 font-mono tabular-nums tracking-tighter transition-colors ${
+                isPomoRunning
+                  ? 'text-red-400 drop-shadow-[0_0_15px_rgba(248,113,113,0.5)]'
+                  : 'text-gray-500'
+              }`}
+            >
               {formatTime(pomoTime)}
             </div>
+
             <div className="flex gap-2 justify-center mb-8">
               <button
                 onClick={() => setPomoDuration(25)}
@@ -183,7 +265,6 @@ export default function TimerApp() {
               >
                 ☕ 휴식 (5분)
               </button>
-              {/* 테스트용 버튼 (5초) */}
               <button
                 onClick={() => setPomoDuration(0.1)}
                 className="px-3 py-1 rounded-full text-sm border border-red-900 text-red-500 hover:bg-red-900 transition-colors"
@@ -191,6 +272,7 @@ export default function TimerApp() {
                 ⚡ 테스트 (5초)
               </button>
             </div>
+
             <div className="flex gap-4 justify-center">
               <button
                 onClick={togglePomo}
@@ -214,9 +296,30 @@ export default function TimerApp() {
           </div>
         ) : (
           <div className="text-center animate-fade-in w-full">
-            <div className="text-7xl font-bold text-blue-400 mb-8 font-mono tabular-nums tracking-tighter">
+            {/* ✨ 스톱워치 상태 배지 */}
+            <div className="mb-6 flex justify-center">
+              {isStopwatchRunning ? (
+                <span className="px-4 py-1 rounded-full bg-blue-500/20 text-blue-400 text-sm font-bold border border-blue-500/50 animate-pulse flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                  ⏱️ 기록 중
+                </span>
+              ) : (
+                <span className="px-4 py-1 rounded-full bg-gray-700 text-gray-400 text-sm font-medium border border-gray-600">
+                  💤 대기 중
+                </span>
+              )}
+            </div>
+
+            <div
+              className={`text-7xl font-bold mb-8 font-mono tabular-nums tracking-tighter transition-colors ${
+                isStopwatchRunning
+                  ? 'text-blue-400 drop-shadow-[0_0_15px_rgba(96,165,250,0.5)]'
+                  : 'text-gray-500'
+              }`}
+            >
               {formatTime(stopwatchTime)}
             </div>
+
             <div className="flex gap-4 justify-center">
               <button
                 onClick={toggleStopwatch}

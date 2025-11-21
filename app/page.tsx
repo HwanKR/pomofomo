@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase';
 import TimerApp from '@/components/TimerApp';
 import Login from '@/components/Login';
 import HistoryList from '@/components/HistoryList';
+import { Toaster } from 'react-hot-toast';
 
 export default function Home() {
   const [session, setSession] = useState<any>(null);
@@ -35,6 +36,7 @@ export default function Home() {
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-gray-900 text-white p-4 overflow-y-auto">
+      <Toaster position="top-center" reverseOrder={false} />
       <div className="py-10 flex flex-col items-center w-full max-w-md">
         <h1 className="text-5xl font-extrabold mb-2 text-transparent bg-clip-text bg-gradient-to-r from-red-400 to-orange-400">
           Pomofomo
