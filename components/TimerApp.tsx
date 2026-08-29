@@ -157,6 +157,7 @@ export default function TimerApp({
     dbTasks,
     weeklyPlans,
     monthlyPlans,
+    longTermTasks,
     selectedTask,
     selectedTaskId,
     setSelectedTask,
@@ -164,6 +165,9 @@ export default function TimerApp({
     getSelectedTaskTitle,
     fetchDbTasks,
     toggleTaskStatus,
+    selectSubtaskForTimer,
+    toggleSubtask,
+    pendingSubtaskIds,
   } = useTasks(isLoggedIn);
 
   // 사이드바를 열 때마다 목록과 작업별 누적 시간을 새로 가져온다.
@@ -1215,7 +1219,7 @@ export default function TimerApp({
             </button>
           </div>
 
-          <TaskSidebar isOpen={isTaskSidebarOpen} onClose={() => setIsTaskSidebarOpen(false)} tasks={dbTasks} weeklyPlans={weeklyPlans} monthlyPlans={monthlyPlans} selectedTaskId={selectedTaskId} onSelectTask={(task) => { if (task) { setSelectedTask(task.title); setSelectedTaskId(task.id); } else { setSelectedTask(''); setSelectedTaskId(null); } }} onToggleTask={(task) => { void toggleTaskStatus(task); }} />
+          <TaskSidebar isOpen={isTaskSidebarOpen} onClose={() => setIsTaskSidebarOpen(false)} tasks={dbTasks} weeklyPlans={weeklyPlans} monthlyPlans={monthlyPlans} longTermTasks={longTermTasks} pendingToggleSubtaskIds={pendingSubtaskIds} selectedTaskId={selectedTaskId} onSelectTask={(task) => { if (task) { setSelectedTask(task.title); setSelectedTaskId(task.id); } else { setSelectedTask(''); setSelectedTaskId(null); } }} onToggleTask={(task) => { void toggleTaskStatus(task); }} onSelectSubtask={(subtask) => selectSubtaskForTimer(subtask).then((row) => { if (row) { setSelectedTask(row.title); setSelectedTaskId(row.id); } return row; })} onToggleSubtask={(subtask) => { void toggleSubtask(subtask); }} />
 
           <div className={`px-6 py-8 sm:px-10 sm:py-10 flex flex-col items-center justify-center min-h-[360px] transition-colors duration-500 ${tab === 'stopwatch' ? 'bg-indigo-50 dark:bg-indigo-950/30' : (timerMode === 'focus' ? 'bg-rose-50 dark:bg-rose-950/30' : 'bg-emerald-50 dark:bg-emerald-950/30')}`}>
             {tab === 'timer' ? (

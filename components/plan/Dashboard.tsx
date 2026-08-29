@@ -10,6 +10,7 @@ import TaskList from './TaskList';
 import Timeline from './Timeline';
 import WeeklyPlan from './WeeklyPlan';
 import MonthlyPlan from './MonthlyPlan';
+import LongTermTasks from './LongTermTasks';
 import { supabase } from '@/lib/supabase';
 import { getCalendarDayStart, getCalendarDayEnd } from '@/lib/dateUtils';
 import { ChevronUp, ChevronDown } from 'lucide-react';
@@ -165,6 +166,11 @@ export default function Dashboard({ session }: DashboardProps) {
               <div>
                 <MonthlyPlan userId={session?.user?.id || ''} />
               </div>
+            </div>
+
+            {/* 6. Long-term Tasks */}
+            <div className="order-6">
+              <LongTermTasks userId={session?.user?.id || ''} />
             </div>
           </div>
         </div>

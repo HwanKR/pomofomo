@@ -77,6 +77,20 @@ checks(check_name, passed) as (
       )
     ),
     (
+      'subtask completion sync trigger is installed',
+      -- The isolated legacy security harness intentionally has no tasks table
+      -- and does not apply this feature migration. Skip there, but enforce the
+      -- trigger whenever the production table is present.
+      to_regclass('public.tasks') is null
+        or exists (
+          select 1
+          from pg_catalog.pg_trigger as t
+          where t.tgrelid = to_regclass('public.tasks')
+            and t.tgname = 'sync_subtask_completion_on_task_status'
+            and not t.tgisinternal
+        )
+    ),
+    (
       'profile self-update policy has USING and WITH CHECK',
       exists (
         select 1

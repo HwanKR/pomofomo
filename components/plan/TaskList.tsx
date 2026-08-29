@@ -41,6 +41,8 @@ interface Task {
   estimated_pomodoros: number;
   duration?: number;
   position: number;
+  source_subtask_id: string | null;
+  parentTitle?: string;
 }
 
 interface PinnedTask {
@@ -55,6 +57,12 @@ type TaskRow = {
   status: Task['status'];
   estimated_pomodoros: number | null;
   position: number | null;
+  source_subtask_id: string | null;
+};
+
+type SubtaskParentRow = {
+  id: string;
+  long_term_tasks: { title: string } | { title: string }[] | null;
 };
 
 type PinnedTaskRow = {
@@ -82,6 +90,7 @@ const normalizeTaskRows = (rows: TaskRow[] | null | undefined): Task[] =>
     status: row.status,
     estimated_pomodoros: row.estimated_pomodoros ?? 0,
     position: row.position ?? 0,
+    source_subtask_id: row.source_subtask_id ?? null,
   }));
 
 const normalizePinnedTaskRows = (
@@ -207,14 +216,7 @@ function SortableTaskItem({
           </button>
         </div>
       ) : (
-        <span
-          className={cn(
-            'flex flex-1 items-center gap-2 font-medium transition-all',
-            task.status === 'done'
-              ? 'text-gray-400 line-through'
-              : 'text-gray-700 dark:text-gray-200'
-          )}
-        >
+        <span className="flex min-w-0 flex-1 items-center gap-2">
           <button
             onClick={() => pinTask(task)}
             className={cn(
@@ -227,7 +229,23 @@ function SortableTaskItem({
           >
             <Pin className={cn('h-4 w-4', isPinned && 'fill-current')} />
           </button>
-          {task.title}
+          <span className="min-w-0 flex-1">
+            <span
+              className={cn(
+                'block truncate font-medium transition-all',
+                task.status === 'done'
+                  ? 'text-gray-400 line-through'
+                  : 'text-gray-700 dark:text-gray-200'
+              )}
+            >
+              {task.title}
+            </span>
+            {task.parentTitle ? (
+              <span className="block truncate text-xs font-normal text-gray-400 dark:text-gray-500">
+                {task.parentTitle}
+              </span>
+            ) : null}
+          </span>
         </span>
       )}
 
@@ -321,7 +339,9 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
 
     const { data: taskData, error: taskError } = await supabase
       .from('tasks')
-      .select('id, title, status, estimated_pomodoros, position')
+      .select(
+        'id, title, status, estimated_pomodoros, position, source_subtask_id'
+      )
       .eq('user_id', userId)
       .eq('due_date', selectedDateKey)
       .order('position', { ascending: true })
@@ -357,7 +377,9 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
       const { data: insertedTasks, error: insertError } = await supabase
         .from('tasks')
         .insert(newTaskPayload)
-        .select('id, title, status, estimated_pomodoros, position');
+        .select(
+          'id, title, status, estimated_pomodoros, position, source_subtask_id'
+        );
 
       if (insertError) {
         console.error('Error auto-creating pinned tasks:', insertError);
@@ -366,6 +388,42 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
           ...taskRows,
           ...normalizeTaskRows(insertedTasks as TaskRow[]),
         ];
+      }
+    }
+
+    const sourceSubtaskIds = [
+      ...new Set(
+        taskRows.flatMap((task) =>
+          task.source_subtask_id ? [task.source_subtask_id] : []
+        )
+      ),
+    ];
+
+    if (sourceSubtaskIds.length > 0) {
+      const { data: parentData, error: parentError } = await supabase
+        .from('long_term_subtasks')
+        .select('id, long_term_tasks(title)')
+        .in('id', sourceSubtaskIds);
+
+      if (parentError) {
+        console.error('Error fetching long-term task titles:', parentError);
+      } else {
+        const parentTitleBySubtaskId = new Map<string, string>();
+        for (const row of (parentData ?? []) as SubtaskParentRow[]) {
+          const relation = Array.isArray(row.long_term_tasks)
+            ? row.long_term_tasks[0]
+            : row.long_term_tasks;
+          if (relation?.title) {
+            parentTitleBySubtaskId.set(row.id, relation.title);
+          }
+        }
+
+        taskRows = taskRows.map((task) => ({
+          ...task,
+          parentTitle: task.source_subtask_id
+            ? parentTitleBySubtaskId.get(task.source_subtask_id)
+            : undefined,
+        }));
       }
     }
 
@@ -547,7 +605,9 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
         status: 'todo',
         position: maxPosition + 1,
       })
-      .select('id, title, status, estimated_pomodoros, position')
+      .select(
+        'id, title, status, estimated_pomodoros, position, source_subtask_id'
+      )
       .single();
 
     if (error) {
