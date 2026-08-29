@@ -277,22 +277,32 @@ export default function NotificationManager({
     if (!isHydrated || permission === 'granted' || !isVisible) return null;
 
     return (
-      <div className="fixed bottom-20 right-4 z-50 flex animate-bounce items-center gap-2">
+      <aside
+        className="mx-auto my-6 w-[calc(100%_-_1.5rem)] max-w-2xl rounded-xl border border-gray-200 bg-white px-4 py-4 text-gray-900 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-100"
+        aria-label="타이머 종료 알림 안내"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1">
+            <h2 className="text-sm font-semibold">타이머 종료 알림</h2>
+            <p className="text-sm text-gray-600 dark:text-gray-300">
+              화면을 보고 있지 않아도 종료 시간을 알려드려요.
+            </p>
+          </div>
+          <button
+            onClick={handleDismiss}
+            className="shrink-0 text-sm font-medium text-gray-500 underline-offset-2 transition-colors hover:text-gray-900 hover:underline dark:text-gray-400 dark:hover:text-white"
+            aria-label="타이머 종료 알림 안내 닫기"
+          >
+            닫기
+          </button>
+        </div>
         <button
           onClick={requestPermission}
-          className="flex items-center gap-2 rounded-full bg-rose-500 px-4 py-2 text-sm font-medium text-white shadow-lg transition-all hover:opacity-90"
+          className="mt-3 inline-flex rounded-lg bg-rose-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-600"
         >
-          <span>🔔</span>
-          <span>알림 켜기</span>
+          알림 켜기
         </button>
-        <button
-          onClick={handleDismiss}
-          className="flex h-6 w-6 items-center justify-center rounded-full bg-white p-1 text-xs text-gray-400 shadow-md hover:text-gray-600"
-          aria-label="닫기"
-        >
-          ×
-        </button>
-      </div>
+      </aside>
     );
   }
 

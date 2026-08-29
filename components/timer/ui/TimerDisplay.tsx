@@ -12,6 +12,8 @@ const formatTime = (seconds: number) => {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 };
 
+const formatPresetDuration = (minutes: number) => `${minutes}분`;
+
 interface TimerDisplayProps {
   timerMode: TimerMode;
   timeLeft: number;
@@ -114,9 +116,15 @@ export const TimerDisplay = ({
           <button
             key={preset.id}
             onClick={() => onPresetClick(preset.minutes)}
+            aria-label={`${preset.label} ${formatPresetDuration(preset.minutes)}`}
             className="px-4 py-2 rounded-xl text-sm font-semibold bg-white dark:bg-slate-700 text-gray-600 dark:text-gray-300 shadow-sm border border-gray-200 dark:border-slate-600 hover:border-rose-300 dark:hover:border-rose-500 hover:text-rose-500 transition-all active:scale-95 whitespace-nowrap"
           >
-            {preset.label}
+            <span className="flex items-center gap-1.5 sm:gap-2">
+              <span>{preset.label}</span>
+              <span className="text-xs font-bold text-gray-500 dark:text-gray-400">
+                {formatPresetDuration(preset.minutes)}
+              </span>
+            </span>
           </button>
         ))}
       </div>

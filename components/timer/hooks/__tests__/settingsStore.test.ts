@@ -18,11 +18,13 @@ import {
   DEFAULT_TASK_OPTIONS,
   SETTINGS_CHANGED_EVENT,
   SETTINGS_KEY,
+  getSettingsStorageKey,
   loadPersistedSettings,
   loadTaskOptions,
   normalizeSettings,
   persistSettings,
   readSettingsSnapshot,
+  resetSettingsSnapshot,
   writeSettingsSnapshot,
   type FomopomoSettings,
 } from '../settingsStore';
@@ -32,6 +34,10 @@ type UserSettingsResult = {
   error?: { code?: string } | null;
 };
 
+const TEST_USER_A = 'user-a';
+const TEST_USER_B = 'user-b';
+const TOKEN_KEY = 'sb-testproj-auth-token';
+
 describe('settingsStore', () => {
   const upsertMock = vi.fn();
   let userSettingsResult: UserSettingsResult;
@@ -40,7 +46,43 @@ describe('settingsStore', () => {
   let eqMock: ReturnType<typeof vi.fn>;
   let singleMock: ReturnType<typeof vi.fn>;
 
+  const signInLocally = (userId: string) => {
+    window.localStorage.setItem(
+      TOKEN_KEY,
+      JSON.stringify({ access_token: 'token', user: { id: userId } })
+    );
+  };
+
+  const signOutLocally = () => {
+    window.localStorage.removeItem(TOKEN_KEY);
+  };
+
+  const setAuthenticatedUser = (userId: string | null) => {
+    supabaseMock.auth.getUser.mockResolvedValue({
+      data: { user: userId ? { id: userId } : null },
+    });
+  };
+
+  const setStoredSettings = (
+    owner: string,
+    settings: Partial<FomopomoSettings>,
+    rawOverride?: string
+  ) => {
+    if (rawOverride !== undefined) {
+      window.localStorage.setItem(getSettingsStorageKey(owner), rawOverride);
+      return;
+    }
+
+    const payload =
+      owner === 'guest' ? settings : { ...settings, ownerUserId: owner };
+    window.localStorage.setItem(
+      getSettingsStorageKey(owner),
+      JSON.stringify(payload)
+    );
+  };
+
   beforeEach(() => {
+    vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'https://testproj.supabase.co');
     window.localStorage.clear();
 
     upsertMock.mockReset();
@@ -56,11 +98,20 @@ describe('settingsStore', () => {
       select: selectMock,
       upsert: upsertMock,
     });
-    supabaseMock.auth.getUser.mockResolvedValue({
-      data: { user: null },
-    });
+    setAuthenticatedUser(null);
 
     dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+  });
+
+  afterEach(() => {
+    dispatchSpy.mockRestore();
+    vi.unstubAllEnvs();
+  });
+
+  it('uses 집중 for every default preset label', () => {
+    expect(DEFAULT_FOMOPOMO_SETTINGS.presets.map((preset) => preset.label)).toEqual(
+      ['집중', '집중', '집중']
+    );
   });
 
   it('normalizes missing seasonal effect, tasks, and presets from canonical defaults', () => {
@@ -144,27 +195,20 @@ describe('settingsStore', () => {
     });
 
     it('survives null preset entries in persisted data instead of crashing the snapshot read', () => {
-      // JSON.stringify turns undefined array slots into null; this runs
-      // inside useSyncExternalStore's getSnapshot, so a throw would take
-      // down the whole render. Corrupt entries are dropped, not resurrected
-      // as empty presets.
-      window.localStorage.setItem(
-        SETTINGS_KEY,
-        JSON.stringify({
-          ...DEFAULT_FOMOPOMO_SETTINGS,
-          presets: [null, { id: 'ok', label: '생존', minutes: 40 }],
-        })
-      );
+      setStoredSettings('guest', {
+        ...DEFAULT_FOMOPOMO_SETTINGS,
+        presets: [null, { id: 'ok', label: '생존', minutes: 40 }] as unknown as
+          FomopomoSettings['presets'],
+      });
 
       expect(readSettingsSnapshot().presets).toEqual([
         { id: 'ok', label: '생존', minutes: 40 },
       ]);
 
-      // All entries corrupt → canonical defaults.
-      window.localStorage.setItem(
-        SETTINGS_KEY,
-        JSON.stringify({ ...DEFAULT_FOMOPOMO_SETTINGS, presets: [null] })
-      );
+      setStoredSettings('guest', {
+        ...DEFAULT_FOMOPOMO_SETTINGS,
+        presets: [null] as unknown as FomopomoSettings['presets'],
+      });
 
       expect(readSettingsSnapshot().presets).toEqual(
         DEFAULT_FOMOPOMO_SETTINGS.presets
@@ -172,9 +216,8 @@ describe('settingsStore', () => {
     });
 
     it('sanitizes corrupt remote settings on load', async () => {
-      supabaseMock.auth.getUser.mockResolvedValue({
-        data: { user: { id: 'user-1' } },
-      });
+      signInLocally(TEST_USER_A);
+      setAuthenticatedUser(TEST_USER_A);
       userSettingsResult = {
         data: {
           settings: {
@@ -199,23 +242,70 @@ describe('settingsStore', () => {
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
 
-    window.localStorage.setItem(SETTINGS_KEY, 'not-json');
+    setStoredSettings('guest', {}, 'not-json');
 
     expect(readSettingsSnapshot()).toEqual(DEFAULT_FOMOPOMO_SETTINGS);
     expect(consoleErrorSpy).toHaveBeenCalled();
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('blocks writes while the current owner storage is still corrupted', () => {
+    setStoredSettings('guest', {}, 'not-json');
+
+    expect(readSettingsSnapshot()).toEqual(DEFAULT_FOMOPOMO_SETTINGS);
+
+    const didWrite = writeSettingsSnapshot({
+      ...DEFAULT_FOMOPOMO_SETTINGS,
+      pomoTime: 60,
+    });
+
+    expect(didWrite).toBe(false);
+    expect(window.localStorage.getItem(SETTINGS_KEY)).toBe('not-json');
+    expect(readSettingsSnapshot()).toMatchObject({
+      ...DEFAULT_FOMOPOMO_SETTINGS,
+      pomoTime: 60,
+    });
+  });
+
+  it('keeps corruption tracking scoped to the active owner key', () => {
+    setStoredSettings('guest', {}, 'not-json');
+    expect(writeSettingsSnapshot({ ...DEFAULT_FOMOPOMO_SETTINGS, pomoTime: 60 })).toBe(
+      false
+    );
+
+    signInLocally(TEST_USER_A);
+
+    expect(
+      writeSettingsSnapshot({
+        ...DEFAULT_FOMOPOMO_SETTINGS,
+        pomoTime: 30,
+      })
+    ).toBe(true);
+
+    expect(window.localStorage.getItem(SETTINGS_KEY)).toBe('not-json');
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(getSettingsStorageKey(TEST_USER_A)) ?? '{}'
+      )
+    ).toEqual({
+      ...DEFAULT_FOMOPOMO_SETTINGS,
+      pomoTime: 30,
+      ownerUserId: TEST_USER_A,
+    });
   });
 
   it('writes normalized settings locally and dispatches the shared event', () => {
-    writeSettingsSnapshot({
-      ...DEFAULT_FOMOPOMO_SETTINGS,
-      seasonalEffectEnabled: false,
-      tasks: [],
-      presets: [],
-    });
-
     expect(
-      JSON.parse(window.localStorage.getItem(SETTINGS_KEY) ?? '{}')
-    ).toEqual({
+      writeSettingsSnapshot({
+        ...DEFAULT_FOMOPOMO_SETTINGS,
+        seasonalEffectEnabled: false,
+        tasks: [],
+        presets: [],
+      })
+    ).toBe(true);
+
+    expect(JSON.parse(window.localStorage.getItem(SETTINGS_KEY) ?? '{}')).toEqual({
       ...DEFAULT_FOMOPOMO_SETTINGS,
       seasonalEffectEnabled: false,
     });
@@ -229,103 +319,119 @@ describe('settingsStore', () => {
     ).toBe(true);
   });
 
-  it('prefers remote persisted settings over local snapshot when authenticated', async () => {
-    supabaseMock.auth.getUser.mockResolvedValue({
-      data: { user: { id: 'user-1' } },
-    });
+  it('prefers remote persisted settings over the scoped local snapshot when authenticated', async () => {
+    signInLocally(TEST_USER_A);
+    setAuthenticatedUser(TEST_USER_A);
     userSettingsResult = {
       data: {
         settings: {
           ...DEFAULT_FOMOPOMO_SETTINGS,
           pomoTime: 77,
           seasonalEffectEnabled: false,
-          tasks: ['원격 작업'],
+          tasks: ['work'],
         },
       },
       error: null,
     };
-    window.localStorage.setItem(
-      SETTINGS_KEY,
-      JSON.stringify({
-        ...DEFAULT_FOMOPOMO_SETTINGS,
-        pomoTime: 33,
-        tasks: ['로컬 작업'],
-      })
-    );
+
+    setStoredSettings(TEST_USER_A, {
+      ...DEFAULT_FOMOPOMO_SETTINGS,
+      pomoTime: 33,
+      tasks: ['local work'],
+    });
 
     await expect(loadPersistedSettings()).resolves.toEqual({
       ...DEFAULT_FOMOPOMO_SETTINGS,
       pomoTime: 77,
       seasonalEffectEnabled: false,
-      tasks: ['원격 작업'],
+      tasks: ['work'],
+    });
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(getSettingsStorageKey(TEST_USER_A)) ?? '{}'
+      )
+    ).toEqual({
+      ...DEFAULT_FOMOPOMO_SETTINGS,
+      pomoTime: 77,
+      seasonalEffectEnabled: false,
+      tasks: ['work'],
+      ownerUserId: TEST_USER_A,
     });
   });
 
-  it('falls back to local snapshot when remote persisted settings are absent', async () => {
-    window.localStorage.setItem(
-      SETTINGS_KEY,
-      JSON.stringify({
-        ...DEFAULT_FOMOPOMO_SETTINGS,
-        pomoTime: 64,
-        tasks: ['로컬 작업'],
-      })
-    );
+  it('refreshes the active scoped snapshot from remote settings even when local data is corrupt', async () => {
+    signInLocally(TEST_USER_A);
+    setAuthenticatedUser(TEST_USER_A);
+    setStoredSettings(TEST_USER_A, {}, 'not-json');
+    userSettingsResult = {
+      data: {
+        settings: {
+          ...DEFAULT_FOMOPOMO_SETTINGS,
+          pomoTime: 88,
+          longBreakInterval: 12,
+        },
+      },
+      error: null,
+    };
+
+    await expect(loadPersistedSettings()).resolves.toEqual({
+      ...DEFAULT_FOMOPOMO_SETTINGS,
+      pomoTime: 88,
+      longBreakInterval: 12,
+    });
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(getSettingsStorageKey(TEST_USER_A)) ?? '{}'
+      )
+    ).toEqual({
+      ...DEFAULT_FOMOPOMO_SETTINGS,
+      pomoTime: 88,
+      longBreakInterval: 12,
+      ownerUserId: TEST_USER_A,
+    });
+  });
+
+  it('falls back to the local snapshot when remote persisted settings are absent', async () => {
+    setStoredSettings('guest', {
+      ...DEFAULT_FOMOPOMO_SETTINGS,
+      pomoTime: 64,
+      tasks: ['local work'],
+    });
 
     await expect(loadPersistedSettings()).resolves.toEqual({
       ...DEFAULT_FOMOPOMO_SETTINGS,
       pomoTime: 64,
-      tasks: ['로컬 작업'],
+      tasks: ['local work'],
     });
   });
 
   it('preserves remote -> local -> default precedence for task options', async () => {
-    supabaseMock.auth.getUser.mockResolvedValue({
-      data: { user: { id: 'user-1' } },
+    signInLocally(TEST_USER_A);
+    setAuthenticatedUser(TEST_USER_A);
+    setStoredSettings(TEST_USER_A, {
+      ...DEFAULT_FOMOPOMO_SETTINGS,
+      tasks: ['local work'],
     });
-    window.localStorage.setItem(
-      SETTINGS_KEY,
-      JSON.stringify({
-        ...DEFAULT_FOMOPOMO_SETTINGS,
-        tasks: ['로컬 작업'],
-      })
-    );
 
     userSettingsResult = {
-      data: { settings: { tasks: ['원격 작업'] } },
+      data: { settings: { tasks: ['remote work'] } },
       error: null,
     };
-    await expect(loadTaskOptions()).resolves.toEqual(['원격 작업']);
+    await expect(loadTaskOptions()).resolves.toEqual(['remote work']);
 
     userSettingsResult = {
       data: { settings: { tasks: [] } },
       error: null,
     };
-    await expect(loadTaskOptions()).resolves.toEqual(['로컬 작업']);
+    await expect(loadTaskOptions()).resolves.toEqual(['local work']);
 
-    window.localStorage.removeItem(SETTINGS_KEY);
+    window.localStorage.removeItem(getSettingsStorageKey(TEST_USER_A));
     await expect(loadTaskOptions()).resolves.toEqual(DEFAULT_TASK_OPTIONS);
   });
 
   describe('account-scoped storage', () => {
-    const TOKEN_KEY = 'sb-testproj-auth-token';
-
-    const signInLocally = (userId: string) => {
-      window.localStorage.setItem(
-        TOKEN_KEY,
-        JSON.stringify({ access_token: 'token', user: { id: userId } })
-      );
-    };
-
-    beforeEach(() => {
-      vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'https://testproj.supabase.co');
-    });
-
-    afterEach(() => {
-      vi.unstubAllEnvs();
-    });
-
     it('writes authenticated settings under a user-scoped key with an owner stamp', () => {
-      signInLocally('user-a');
+      signInLocally(TEST_USER_A);
 
       writeSettingsSnapshot({
         ...DEFAULT_FOMOPOMO_SETTINGS,
@@ -335,22 +441,22 @@ describe('settingsStore', () => {
       expect(window.localStorage.getItem(SETTINGS_KEY)).toBeNull();
       expect(
         JSON.parse(
-          window.localStorage.getItem(`${SETTINGS_KEY}::user-a`) ?? '{}'
+          window.localStorage.getItem(getSettingsStorageKey(TEST_USER_A)) ?? '{}'
         )
       ).toEqual({
         ...DEFAULT_FOMOPOMO_SETTINGS,
         pomoTime: 30,
-        ownerUserId: 'user-a',
+        ownerUserId: TEST_USER_A,
       });
     });
 
     it('does not leak guest settings into a newly authenticated account', async () => {
-      window.localStorage.setItem(
-        SETTINGS_KEY,
-        JSON.stringify({ ...DEFAULT_FOMOPOMO_SETTINGS, pomoTime: 99 })
-      );
+      setStoredSettings('guest', {
+        ...DEFAULT_FOMOPOMO_SETTINGS,
+        pomoTime: 99,
+      });
 
-      signInLocally('user-b');
+      signInLocally(TEST_USER_B);
 
       expect(readSettingsSnapshot()).toEqual(DEFAULT_FOMOPOMO_SETTINGS);
       await expect(loadPersistedSettings()).resolves.toEqual(
@@ -359,52 +465,154 @@ describe('settingsStore', () => {
     });
 
     it('keeps settings isolated between accounts and the guest namespace', () => {
-      signInLocally('user-a');
+      signInLocally(TEST_USER_A);
       writeSettingsSnapshot({ ...DEFAULT_FOMOPOMO_SETTINGS, pomoTime: 30 });
       expect(readSettingsSnapshot().pomoTime).toBe(30);
 
-      signInLocally('user-b');
+      signInLocally(TEST_USER_B);
       expect(readSettingsSnapshot()).toEqual(DEFAULT_FOMOPOMO_SETTINGS);
       writeSettingsSnapshot({ ...DEFAULT_FOMOPOMO_SETTINGS, pomoTime: 45 });
       expect(readSettingsSnapshot().pomoTime).toBe(45);
 
-      signInLocally('user-a');
+      signInLocally(TEST_USER_A);
       expect(readSettingsSnapshot().pomoTime).toBe(30);
 
-      window.localStorage.removeItem(TOKEN_KEY);
+      signOutLocally();
       expect(readSettingsSnapshot()).toEqual(DEFAULT_FOMOPOMO_SETTINGS);
     });
   });
 
   it('writes locally before remote upsert during async persistence', async () => {
-    supabaseMock.auth.getUser.mockResolvedValue({
-      data: { user: { id: 'user-1' } },
-    });
+    signInLocally(TEST_USER_A);
+    setAuthenticatedUser(TEST_USER_A);
     upsertMock.mockImplementation(async () => {
       expect(
-        JSON.parse(window.localStorage.getItem(SETTINGS_KEY) ?? '{}')
+        JSON.parse(
+          window.localStorage.getItem(getSettingsStorageKey(TEST_USER_A)) ?? '{}'
+        )
       ).toEqual(
         expect.objectContaining({
           pomoTime: 45,
           seasonalEffectEnabled: false,
+          ownerUserId: TEST_USER_A,
         })
       );
 
       return { error: null };
     });
 
-    await persistSettings({
-      ...DEFAULT_FOMOPOMO_SETTINGS,
-      pomoTime: 45,
-      seasonalEffectEnabled: false,
-    });
+    await expect(
+      persistSettings({
+        ...DEFAULT_FOMOPOMO_SETTINGS,
+        pomoTime: 45,
+        seasonalEffectEnabled: false,
+      })
+    ).resolves.toBe(true);
 
     expect(upsertMock).toHaveBeenCalledWith({
-      user_id: 'user-1',
+      user_id: TEST_USER_A,
       settings: expect.objectContaining({
         pomoTime: 45,
         seasonalEffectEnabled: false,
       }),
+    });
+  });
+
+  it('returns false and skips remote upsert when local persistence is blocked by corruption', async () => {
+    signInLocally(TEST_USER_A);
+    setAuthenticatedUser(TEST_USER_A);
+    setStoredSettings(TEST_USER_A, {}, 'not-json');
+
+    await expect(
+      persistSettings({
+        ...DEFAULT_FOMOPOMO_SETTINGS,
+        pomoTime: 42,
+      })
+    ).resolves.toBe(false);
+
+    expect(window.localStorage.getItem(getSettingsStorageKey(TEST_USER_A))).toBe(
+      'not-json'
+    );
+    expect(upsertMock).not.toHaveBeenCalled();
+  });
+
+  it('returns false when the remote upsert returns an error result', async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    signInLocally(TEST_USER_A);
+    setAuthenticatedUser(TEST_USER_A);
+    upsertMock.mockResolvedValueOnce({
+      error: { message: 'remote write failed' },
+    });
+
+    await expect(
+      persistSettings({
+        ...DEFAULT_FOMOPOMO_SETTINGS,
+        pomoTime: 42,
+      })
+    ).resolves.toBe(false);
+
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      'Failed to persist settings',
+      expect.objectContaining({ message: 'remote write failed' })
+    );
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('returns false when local storage rejects the write', () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const originalLocalStorage = window.localStorage;
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: originalLocalStorage.getItem.bind(originalLocalStorage),
+        setItem: vi.fn(() => {
+          throw new Error('quota exceeded');
+        }),
+        removeItem: originalLocalStorage.removeItem.bind(originalLocalStorage),
+        clear: originalLocalStorage.clear.bind(originalLocalStorage),
+        key: originalLocalStorage.key.bind(originalLocalStorage),
+        get length() {
+          return originalLocalStorage.length;
+        },
+      } satisfies Storage,
+    });
+
+    expect(
+      writeSettingsSnapshot({
+        ...DEFAULT_FOMOPOMO_SETTINGS,
+        pomoTime: 42,
+      })
+    ).toBe(false);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      'Failed to persist settings locally',
+      expect.any(Error)
+    );
+
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: originalLocalStorage,
+    });
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('restores canonical defaults when explicitly reset', () => {
+    signInLocally(TEST_USER_A);
+    setStoredSettings(TEST_USER_A, {}, 'corrupt-reset-json');
+
+    expect(readSettingsSnapshot()).toEqual(DEFAULT_FOMOPOMO_SETTINGS);
+    expect(resetSettingsSnapshot()).toBe(true);
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(getSettingsStorageKey(TEST_USER_A)) ?? '{}'
+      )
+    ).toEqual({
+      ...DEFAULT_FOMOPOMO_SETTINGS,
+      ownerUserId: TEST_USER_A,
     });
   });
 });

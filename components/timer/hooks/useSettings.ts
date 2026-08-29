@@ -33,7 +33,7 @@ export const useSettings = (_settingsUpdated: number) => {
   }, []);
 
   const persistSettings = useCallback(async (newSettings: Settings) => {
-    await persistSettingsSnapshot(newSettings);
+    return persistSettingsSnapshot(newSettings);
   }, []);
 
   return { settings, setSettings, persistSettings };

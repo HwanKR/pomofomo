@@ -647,9 +647,15 @@ export default function TimerApp({
   };
 
   const handleDisableTaskPopup = async () => {
-    const updated = { ...settings, taskPopupEnabled: false };
+    const previousSettings = { ...settings };
+    const updated = { ...previousSettings, taskPopupEnabled: false };
     setSettings(updated);
-    await persistSettings(updated);
+    const didPersist = await persistSettings(updated);
+    if (!didPersist) {
+      setSettings(previousSettings);
+      toast.error('설정을 저장할 수 없습니다. 데이터를 복구하거나 초기화한 뒤 다시 시도해주세요.');
+      return;
+    }
     // Announce only the setting change here; the save outcome gets its own
     // toast from savePendingRecord, so a premature success message can't
     // contradict a failed save.

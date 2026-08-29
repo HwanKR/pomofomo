@@ -6,7 +6,7 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const { toastMock, supabaseMock } = vi.hoisted(() => ({
+const { toastMock, supabaseMock, routerReplaceMock } = vi.hoisted(() => ({
   toastMock: {
     loading: vi.fn(),
     success: vi.fn(),
@@ -20,6 +20,11 @@ const { toastMock, supabaseMock } = vi.hoisted(() => ({
     },
     from: vi.fn(),
   },
+  routerReplaceMock: vi.fn(),
+}));
+
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ replace: routerReplaceMock }),
 }));
 
 vi.mock('@/lib/supabase', () => ({
@@ -79,9 +84,9 @@ const DEFAULT_SETTINGS: SettingsShape = {
   seasonalEffectEnabled: true,
   tasks: ['국어', '수학', '영어'],
   presets: [
-    { id: '1', label: '프리셋1', minutes: 25 },
-    { id: '2', label: '프리셋2', minutes: 50 },
-    { id: '3', label: '프리셋3', minutes: 90 },
+    { id: '1', label: '집중', minutes: 25 },
+    { id: '2', label: '집중', minutes: 50 },
+    { id: '3', label: '집중', minutes: 90 },
   ],
 };
 
@@ -189,6 +194,7 @@ describe('SettingsModal', () => {
     mockUser(null);
     mockSession(null);
     supabaseMock.auth.signOut.mockResolvedValue({ error: null });
+    routerReplaceMock.mockReset();
 
     toastMock.loading.mockReset();
     toastMock.success.mockReset();
@@ -305,6 +311,33 @@ describe('SettingsModal', () => {
     expect(toastMock.success).toHaveBeenCalledWith('설정이 저장되었습니다!');
     expect(onSave).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows an error and keeps the modal open when persisting settings fails', async () => {
+    mockUser('user-save-fail');
+    setStoredSettings({ pomoTime: 26 });
+    upsertMock.mockImplementationOnce(async () => {
+      throw new Error('save failed');
+    });
+
+    const { onClose, onSave } = renderModal();
+
+    await waitFor(() => {
+      expect(getTimeInputs()[0]).toHaveValue(26);
+    });
+
+    const [pomoInput] = getTimeInputs();
+    fireEvent.change(pomoInput, { target: { value: '33' } });
+    fireEvent.click(screen.getByRole('button', { name: '저장하기' }));
+
+    await waitFor(() => {
+      expect(toastMock.error).toHaveBeenCalledWith(
+        '설정을 저장할 수 없습니다. 데이터를 복구하거나 초기화한 뒤 다시 시도해주세요.'
+      );
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('dismisses without saving when the stored settings have not loaded yet', async () => {
@@ -445,11 +478,42 @@ describe('SettingsModal', () => {
     ) as SettingsShape;
 
     expect(savedSettings).toEqual(DEFAULT_SETTINGS);
+    expect(upsertMock).toHaveBeenCalledWith({
+      user_id: 'user-reset-settings',
+      settings: DEFAULT_SETTINGS,
+    });
     expect(toastMock.success).toHaveBeenCalledWith(
       '설정이 기본값으로 초기화되었습니다!'
     );
     expect(onSave).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs corrupt local settings during reset but stays open when remote persistence fails', async () => {
+    mockUser('user-reset-fail');
+    window.localStorage.setItem('fomopomo_settings', 'not-json');
+    upsertMock.mockImplementationOnce(async () => {
+      throw new Error('reset failed');
+    });
+
+    const { onClose, onSave } = renderModal();
+
+    fireEvent.click(screen.getByRole('button', { name: /설정 초기화/ }));
+    fireEvent.click(screen.getByRole('button', { name: '초기화' }));
+
+    await waitFor(() => {
+      expect(toastMock.error).toHaveBeenCalledWith(
+        '설정을 기본값으로 저장할 수 없습니다. 다시 시도해주세요.'
+      );
+    });
+
+    const savedSettings = JSON.parse(
+      window.localStorage.getItem('fomopomo_settings') ?? '{}'
+    ) as SettingsShape;
+
+    expect(savedSettings).toEqual(DEFAULT_SETTINGS);
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('sends the bearer token to account reset and clears local state on success', async () => {
@@ -583,7 +647,7 @@ describe('SettingsModal', () => {
     });
 
     expect(window.localStorage.getItem('fomopomo_settings')).toBeNull();
-    expect(window.location.href.endsWith('/')).toBe(true);
+    expect(routerReplaceMock).toHaveBeenCalledWith('/');
   });
 
   it('short-circuits account actions when there is no active session', async () => {

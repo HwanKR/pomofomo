@@ -41,6 +41,7 @@ export function getSettingsStorageKey(
 ): string {
   return getScopedStorageKey(SETTINGS_KEY, owner);
 }
+
 export const SETTINGS_CHANGED_EVENT = 'settingsChanged';
 export const DEFAULT_TASK_OPTIONS = ['국어', '수학', '영어'];
 export const DEFAULT_FOMOPOMO_SETTINGS: FomopomoSettings = {
@@ -56,24 +57,27 @@ export const DEFAULT_FOMOPOMO_SETTINGS: FomopomoSettings = {
   seasonalEffectEnabled: true,
   tasks: DEFAULT_TASK_OPTIONS,
   presets: [
-    { id: '1', label: '프리셋1', minutes: 25 },
-    { id: '2', label: '프리셋2', minutes: 50 },
-    { id: '3', label: '프리셋3', minutes: 90 },
+    { id: '1', label: '집중', minutes: 25 },
+    { id: '2', label: '집중', minutes: 50 },
+    { id: '3', label: '집중', minutes: 90 },
   ],
 };
 
 let cachedOwner: string | null = null;
+let cachedStorageKey: string | null = null;
 let cachedRawSettings: string | null = null;
 let cachedSettingsSnapshot: FomopomoSettings = DEFAULT_FOMOPOMO_SETTINGS;
+let cachedSettingsParseFailed = false;
+let cachedCorruptedRawSettings: string | null = null;
 
 const cloneTasks = (tasks: string[]) => [...tasks];
 const clonePresets = (presets: Preset[]) =>
   presets.map((preset) => ({ ...preset }));
 
 // Bounds for the user-tunable numbers. Out-of-range values break the timer
-// outright — pomoTime 0 completes the instant it starts (an alarm loop with
+// outright: pomoTime 0 completes the instant it starts (an alarm loop with
 // auto-start on), longBreakInterval 0 makes `cycle % interval` NaN so the
-// long break never arrives — and they can enter through a cleared input
+// long break never arrives, and they can enter through a cleared input
 // saved by an old client (Number('') === 0), corrupt localStorage, or a
 // remote user_settings row written by anything.
 const MAX_MINUTES = 999;
@@ -91,6 +95,7 @@ const clampIntSetting = (
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return fallback;
   }
+
   return Math.min(max, Math.max(min, Math.round(value)));
 };
 
@@ -124,7 +129,7 @@ const getValidPresets = (
     return clonePresets(fallback);
   }
 
-  // Preset minutes feed setTimeLeft directly on click — same instant-complete
+  // Preset minutes feed setTimeLeft directly on click: same instant-complete
   // failure mode as pomoTime 0, same defense.
   return validPresets.map((preset) => ({
     ...preset,
@@ -140,7 +145,11 @@ const getValidPresets = (
 export function normalizeSettings(
   rawSettings: PartialFomopomoSettings | null | undefined
 ): FomopomoSettings {
-  const raw = rawSettings as (PartialFomopomoSettings & { snowEnabled?: boolean }) | null | undefined;
+  const raw = rawSettings as
+    | (PartialFomopomoSettings & { snowEnabled?: boolean })
+    | null
+    | undefined;
+
   return {
     ...DEFAULT_FOMOPOMO_SETTINGS,
     ...rawSettings,
@@ -175,16 +184,12 @@ export function normalizeSettings(
       100
     ),
     taskPopupEnabled:
-      raw?.taskPopupEnabled ??
-      DEFAULT_FOMOPOMO_SETTINGS.taskPopupEnabled,
+      raw?.taskPopupEnabled ?? DEFAULT_FOMOPOMO_SETTINGS.taskPopupEnabled,
     seasonalEffectEnabled:
       raw?.seasonalEffectEnabled ??
       raw?.snowEnabled ??
       DEFAULT_FOMOPOMO_SETTINGS.seasonalEffectEnabled,
-    tasks: getValidTasks(
-      rawSettings?.tasks,
-      DEFAULT_FOMOPOMO_SETTINGS.tasks
-    ),
+    tasks: getValidTasks(rawSettings?.tasks, DEFAULT_FOMOPOMO_SETTINGS.tasks),
     presets: getValidPresets(
       rawSettings?.presets,
       DEFAULT_FOMOPOMO_SETTINGS.presets
@@ -227,23 +232,59 @@ function readStoredSettingsRaw(owner: string) {
   return window.localStorage.getItem(getSettingsStorageKey(owner));
 }
 
+function cacheSettingsSnapshot(
+  owner: string,
+  storageKey: string,
+  rawSettings: string | null,
+  snapshot: FomopomoSettings,
+  parseFailed: boolean
+) {
+  cachedOwner = owner;
+  cachedStorageKey = storageKey;
+  cachedRawSettings = rawSettings;
+  cachedSettingsSnapshot = snapshot;
+  cachedSettingsParseFailed = parseFailed;
+  cachedCorruptedRawSettings = parseFailed ? rawSettings : null;
+}
+
 export function readSettingsSnapshot(): FomopomoSettings {
   if (typeof window === 'undefined') {
     return DEFAULT_FOMOPOMO_SETTINGS;
   }
 
   const owner = getStorageOwner();
+  const storageKey = getSettingsStorageKey(owner);
   const savedSettings = readStoredSettingsRaw(owner);
-  if (owner === cachedOwner && savedSettings === cachedRawSettings) {
+
+  if (
+    owner === cachedOwner &&
+    storageKey === cachedStorageKey &&
+    savedSettings === cachedRawSettings &&
+    (!cachedSettingsParseFailed || savedSettings === cachedCorruptedRawSettings)
+  ) {
     return cachedSettingsSnapshot;
   }
 
-  cachedOwner = owner;
+  if (savedSettings === null) {
+    cacheSettingsSnapshot(
+      owner,
+      storageKey,
+      null,
+      DEFAULT_FOMOPOMO_SETTINGS,
+      false
+    );
+    return cachedSettingsSnapshot;
+  }
 
   const parsedSettings = parseStoredSettings(savedSettings);
   if (!parsedSettings) {
-    cachedRawSettings = null;
-    cachedSettingsSnapshot = DEFAULT_FOMOPOMO_SETTINGS;
+    cacheSettingsSnapshot(
+      owner,
+      storageKey,
+      savedSettings,
+      DEFAULT_FOMOPOMO_SETTINGS,
+      true
+    );
     return cachedSettingsSnapshot;
   }
 
@@ -254,35 +295,102 @@ export function readSettingsSnapshot(): FomopomoSettings {
     (ownerStamp !== undefined && ownerStamp !== owner) ||
     (ownerStamp === undefined && owner !== GUEST_OWNER)
   ) {
-    window.localStorage.removeItem(getSettingsStorageKey(owner));
-    cachedRawSettings = null;
-    cachedSettingsSnapshot = DEFAULT_FOMOPOMO_SETTINGS;
+    window.localStorage.removeItem(storageKey);
+    cacheSettingsSnapshot(
+      owner,
+      storageKey,
+      null,
+      DEFAULT_FOMOPOMO_SETTINGS,
+      false
+    );
     return cachedSettingsSnapshot;
   }
 
-  cachedRawSettings = savedSettings;
-  cachedSettingsSnapshot = normalizeSettings(settings);
+  cacheSettingsSnapshot(
+    owner,
+    storageKey,
+    savedSettings,
+    normalizeSettings(settings),
+    false
+  );
   return cachedSettingsSnapshot;
 }
 
-export function writeSettingsSnapshot(settings: FomopomoSettings) {
+type WriteSettingsSnapshotOptions = {
+  allowCorruptedWrite?: boolean;
+};
+
+export function writeSettingsSnapshot(
+  settings: FomopomoSettings,
+  options: WriteSettingsSnapshotOptions = {}
+): boolean {
   if (typeof window === 'undefined') {
-    return;
+    return false;
   }
 
   const owner = getStorageOwner();
+  const storageKey = getSettingsStorageKey(owner);
   const normalizedSettings = normalizeSettings(settings);
+  const currentRawSettings = readStoredSettingsRaw(owner);
+
+  if (
+    owner !== cachedOwner ||
+    storageKey !== cachedStorageKey ||
+    currentRawSettings !== cachedRawSettings
+  ) {
+    readSettingsSnapshot();
+  }
+
+  const refreshedRawSettings = readStoredSettingsRaw(owner);
+  const isCorruptedStorage =
+    owner === cachedOwner &&
+    storageKey === cachedStorageKey &&
+    cachedSettingsParseFailed &&
+    refreshedRawSettings !== null &&
+    refreshedRawSettings === cachedCorruptedRawSettings;
+
+  if (isCorruptedStorage && !options.allowCorruptedWrite) {
+    cacheSettingsSnapshot(
+      owner,
+      storageKey,
+      refreshedRawSettings,
+      normalizedSettings,
+      true
+    );
+    window.dispatchEvent(new Event(SETTINGS_CHANGED_EVENT));
+    return false;
+  }
+
   const payload: StoredSettingsPayload =
     owner === GUEST_OWNER
       ? normalizedSettings
       : { ...normalizedSettings, ownerUserId: owner };
   const serializedSettings = JSON.stringify(payload);
 
-  cachedOwner = owner;
-  cachedRawSettings = serializedSettings;
-  cachedSettingsSnapshot = normalizedSettings;
-  window.localStorage.setItem(getSettingsStorageKey(owner), serializedSettings);
+  try {
+    window.localStorage.setItem(storageKey, serializedSettings);
+  } catch (error) {
+    console.error('Failed to persist settings locally', error);
+    return false;
+  }
+
+  cacheSettingsSnapshot(
+    owner,
+    storageKey,
+    serializedSettings,
+    normalizedSettings,
+    false
+  );
   window.dispatchEvent(new Event(SETTINGS_CHANGED_EVENT));
+  return true;
+}
+
+export function restoreSettingsSnapshot(settings: FomopomoSettings): boolean {
+  return writeSettingsSnapshot(settings, { allowCorruptedWrite: true });
+}
+
+export function resetSettingsSnapshot(): boolean {
+  return restoreSettingsSnapshot(DEFAULT_FOMOPOMO_SETTINGS);
 }
 
 export function subscribeSettings(onStoreChange: () => void) {
@@ -335,7 +443,9 @@ export async function loadPersistedSettings(): Promise<FomopomoSettings> {
     if (userId) {
       const remoteSettings = await fetchRemoteSettings(userId);
       if (remoteSettings) {
-        return normalizeSettings(remoteSettings);
+        const normalizedSettings = normalizeSettings(remoteSettings);
+        restoreSettingsSnapshot(normalizedSettings);
+        return normalizedSettings;
       }
     }
   } catch (error) {
@@ -367,20 +477,32 @@ export async function loadTaskOptions(): Promise<string[]> {
 
 export async function persistSettings(settings: FomopomoSettings) {
   const normalizedSettings = normalizeSettings(settings);
-  writeSettingsSnapshot(normalizedSettings);
+  const wroteSnapshot = writeSettingsSnapshot(normalizedSettings);
+
+  if (!wroteSnapshot) {
+    return false;
+  }
 
   try {
     const userId = await getAuthenticatedUserId();
 
     if (!userId) {
-      return;
+      return true;
     }
 
-    await supabase.from('user_settings').upsert({
+    const { error } = await supabase.from('user_settings').upsert({
       user_id: userId,
       settings: normalizedSettings,
     });
+
+    if (error) {
+      console.error('Failed to persist settings', error);
+      return false;
+    }
+
+    return true;
   } catch (error) {
-    console.error('설정 저장 실패:', error);
+    console.error('Failed to persist settings', error);
+    return false;
   }
 }

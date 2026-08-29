@@ -1,6 +1,7 @@
 ﻿'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import toast from 'react-hot-toast';
 import NotificationManager from './NotificationManager';
@@ -9,6 +10,7 @@ import {
   DEFAULT_FOMOPOMO_SETTINGS,
   loadPersistedSettings,
   normalizeSettings,
+  resetSettingsSnapshot,
   persistSettings as persistStoredSettings,
   type FomopomoSettings,
   type Preset,
@@ -37,6 +39,7 @@ export default function SettingsModal({
   onClose,
   onSave,
 }: SettingsModalProps) {
+  const router = useRouter();
   // False until the load effect hydrates the form with the user's stored
   // settings. Every dismissal path saves, so persisting before hydration
   // would overwrite the stored settings with the untouched default form.
@@ -155,7 +158,11 @@ export default function SettingsModal({
     // Reflect the normalized values in the form so the UI never disagrees
     // with what was stored (a cleared field shows its recovered default).
     applySettingsToForm(settingsToSave);
-    await persistStoredSettings(settingsToSave);
+    const didPersist = await persistStoredSettings(settingsToSave);
+    if (!didPersist) {
+      toast.error('설정을 저장할 수 없습니다. 데이터를 복구하거나 초기화한 뒤 다시 시도해주세요.');
+      return;
+    }
     toast.success('설정이 저장되었습니다!');
     onSave();
     onClose();
@@ -163,7 +170,16 @@ export default function SettingsModal({
 
   const handleResetSettings = async () => {
     applySettingsToForm(DEFAULT_FOMOPOMO_SETTINGS);
-    await persistStoredSettings(DEFAULT_FOMOPOMO_SETTINGS);
+    const didResetSnapshot = resetSettingsSnapshot();
+    if (!didResetSnapshot) {
+      toast.error('설정을 초기화할 수 없습니다.');
+      return;
+    }
+    const didPersist = await persistStoredSettings(DEFAULT_FOMOPOMO_SETTINGS);
+    if (!didPersist) {
+      toast.error('설정을 기본값으로 저장할 수 없습니다. 다시 시도해주세요.');
+      return;
+    }
     toast.success('설정이 기본값으로 초기화되었습니다!');
     onSave();
     onClose();
@@ -321,7 +337,7 @@ export default function SettingsModal({
       } catch (error) {
         console.error('로그아웃 실패:', error);
       }
-      window.location.href = '/';
+      router.replace('/');
     } catch (e) {
       console.error('계정 삭제 오류:', e);
       toast.error('계정 삭제에 실패했습니다. 다시 시도해주세요.', { id: toastId });

@@ -149,9 +149,10 @@ describe('useSettings', () => {
     });
 
     const { result } = renderHook(() => useSettings(0));
+    let didPersist: boolean | undefined;
 
     await act(async () => {
-      await result.current.persistSettings({
+      didPersist = await result.current.persistSettings({
         ...DEFAULT_SETTINGS,
         pomoTime: 45,
         taskPopupEnabled: false,
@@ -159,6 +160,7 @@ describe('useSettings', () => {
       });
     });
 
+    expect(didPersist).toBe(true);
     expect(upsertMock).toHaveBeenCalledWith({
       user_id: 'user-1',
       settings: expect.objectContaining({
@@ -171,19 +173,46 @@ describe('useSettings', () => {
 
   it('persistSettings skips remote upsert when there is no authenticated user', async () => {
     const { result } = renderHook(() => useSettings(0));
+    let didPersist: boolean | undefined;
 
     await act(async () => {
-      await result.current.persistSettings({
+      didPersist = await result.current.persistSettings({
         ...DEFAULT_SETTINGS,
         volume: 25,
       });
     });
 
+    expect(didPersist).toBe(true);
     const storedSettings = JSON.parse(
       window.localStorage.getItem(SETTINGS_KEY) ?? '{}'
     ) as Settings;
 
     expect(storedSettings.volume).toBe(25);
     expect(upsertMock).not.toHaveBeenCalled();
+  });
+
+  it('persistSettings forwards false when remote persistence fails', async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    supabaseMock.auth.getUser.mockResolvedValue({
+      data: { user: { id: 'user-1' } },
+    });
+    upsertMock.mockImplementationOnce(async () => {
+      throw new Error('persist failed');
+    });
+
+    const { result } = renderHook(() => useSettings(0));
+    let didPersist: boolean | undefined;
+
+    await act(async () => {
+      didPersist = await result.current.persistSettings({
+        ...DEFAULT_SETTINGS,
+        volume: 25,
+      });
+    });
+
+    expect(didPersist).toBe(false);
+    expect(consoleErrorSpy).toHaveBeenCalled();
   });
 });
