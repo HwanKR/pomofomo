@@ -91,6 +91,58 @@ checks(check_name, passed) as (
         )
     ),
     (
+      'long-term task tables are unavailable to anonymous roles',
+      to_regclass('public.long_term_tasks') is null
+        or (
+          not exists (
+            select 1
+            from information_schema.role_table_grants as grants
+            where grants.table_schema = 'public'
+              and grants.table_name in (
+                'long_term_tasks',
+                'long_term_subtasks'
+              )
+              and grants.grantee in ('PUBLIC', 'anon')
+          )
+        )
+    ),
+    (
+      'long-term task tables expose authenticated CRUD only',
+      to_regclass('public.long_term_tasks') is null
+        or (
+          has_table_privilege(
+            'authenticated', 'public.long_term_tasks', 'SELECT'
+          )
+          and has_table_privilege(
+            'authenticated', 'public.long_term_tasks', 'INSERT'
+          )
+          and has_table_privilege(
+            'authenticated', 'public.long_term_tasks', 'UPDATE'
+          )
+          and has_table_privilege(
+            'authenticated', 'public.long_term_tasks', 'DELETE'
+          )
+          and not has_table_privilege(
+            'authenticated', 'public.long_term_tasks', 'TRUNCATE'
+          )
+          and has_table_privilege(
+            'authenticated', 'public.long_term_subtasks', 'SELECT'
+          )
+          and has_table_privilege(
+            'authenticated', 'public.long_term_subtasks', 'INSERT'
+          )
+          and has_table_privilege(
+            'authenticated', 'public.long_term_subtasks', 'UPDATE'
+          )
+          and has_table_privilege(
+            'authenticated', 'public.long_term_subtasks', 'DELETE'
+          )
+          and not has_table_privilege(
+            'authenticated', 'public.long_term_subtasks', 'TRUNCATE'
+          )
+        )
+    ),
+    (
       'profile self-update policy has USING and WITH CHECK',
       exists (
         select 1
