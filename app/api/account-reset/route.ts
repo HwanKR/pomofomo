@@ -278,6 +278,8 @@ export async function POST(request: NextRequest) {
     await deleteByUserId('study_sessions');
 
     await deleteByUserId('tasks');
+    await deleteByUserId('long_term_subtasks');
+    await deleteByUserId('long_term_tasks');
     await deleteByUserId('pinned_tasks');
     await deleteByUserId('weekly_plans');
     await deleteByUserId('monthly_plans');
