@@ -563,9 +563,10 @@ export default function TimerApp({
       }
     }
 
-    changeTimerMode(mode);
+    // Persist the duration applied by the hook, not this render's old timeLeft.
+    const nextTimeLeft = changeTimerMode(mode);
     setIntervals([]);
-    saveState(tab, mode, false, timeLeft, null, cycleCount, mode === 'focus' ? 0 : focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, [], null);
+    saveState(tab, mode, false, nextTimeLeft, null, cycleCount, mode === 'focus' ? 0 : focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, [], null);
   };
 
   const handlePresetClick = (minutes: number) => {

@@ -306,6 +306,104 @@ describe('TimerApp completion persistence', () => {
     expect(saved.timer.targetTime).toBeNull();
   });
 
+  describe('manual mode switch persistence', () => {
+    const lastTimerDisplayProps = () =>
+      mocks.timerDisplayProps[mocks.timerDisplayProps.length - 1];
+
+    describe.each([
+      {
+        name: 'default durations',
+        settings: { pomoTime: 25, shortBreak: 5, longBreak: 15 },
+        seconds: { focus: 1500, shortBreak: 300, longBreak: 900 },
+      },
+      {
+        name: 'custom durations',
+        settings: { pomoTime: 42, shortBreak: 7, longBreak: 18 },
+        seconds: { focus: 2520, shortBreak: 420, longBreak: 1080 },
+      },
+    ])('$name', ({ settings, seconds }) => {
+      it.each([
+        ['focus', 'shortBreak'],
+        ['focus', 'longBreak'],
+        ['shortBreak', 'focus'],
+        ['longBreak', 'focus'],
+      ] as const)('keeps %s → %s at its full duration after a reload without offering phantom saves', async (from, to) => {
+        Object.assign(mocks.settings, settings);
+        seedTimerState({
+          mode: from,
+          isRunning: false,
+          secondsLeft: seconds[from],
+          configuredDurations: seconds,
+        });
+        const view = render(
+          <TimerApp settingsUpdated={0} onRecordSaved={vi.fn()} isLoggedIn={true} />
+        );
+        await act(async () => {});
+
+        await act(async () => {
+          (lastTimerDisplayProps().onChangeMode as (mode: string) => void)(to);
+        });
+
+        expect(lastTimerDisplayProps().timerMode).toBe(to);
+        expect(lastTimerDisplayProps().timeLeft).toBe(seconds[to]);
+        const saved = savedFullState();
+
+        // A fresh mount exercises the same persisted snapshot as a reload.
+        view.unmount();
+        render(
+          <TimerApp settingsUpdated={0} onRecordSaved={vi.fn()} isLoggedIn={true} />
+        );
+        await act(async () => {});
+
+        expect(lastTimerDisplayProps().timerMode).toBe(to);
+        expect(lastTimerDisplayProps().timeLeft).toBe(seconds[to]);
+        expect(lastTimerDisplayProps().showSaveButton).toBe(false);
+        expect(saved.timer).toMatchObject({
+          mode: to,
+          timeLeft: seconds[to],
+          isRunning: false,
+          targetTime: null,
+        });
+        expect(mocks.createPendingRecord).not.toHaveBeenCalled();
+        expect(mocks.savePendingRecord).not.toHaveBeenCalled();
+      });
+    });
+
+    it('saves actual unsaved focus time once when switching to a break', async () => {
+      seedRunningFocusTimer(25 * 60);
+      const view = render(
+        <TimerApp settingsUpdated={0} onRecordSaved={vi.fn()} isLoggedIn={true} />
+      );
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+
+      await act(async () => {
+        (lastTimerDisplayProps().onChangeMode as (mode: string) => void)('shortBreak');
+      });
+
+      expect(mocks.createPendingRecord).toHaveBeenCalledTimes(1);
+      expect(mocks.createPendingRecord).toHaveBeenCalledWith('pomo', 60, Date.now());
+      expect(mocks.savePendingRecord).toHaveBeenCalledTimes(1);
+      expect(mocks.savePendingRecord).toHaveBeenCalledWith(
+        expect.objectContaining({ mode: 'pomo', duration: 60 }),
+        '',
+        null
+      );
+
+      view.unmount();
+      render(
+        <TimerApp settingsUpdated={0} onRecordSaved={vi.fn()} isLoggedIn={true} />
+      );
+      await act(async () => {});
+
+      expect(lastTimerDisplayProps().timeLeft).toBe(5 * 60);
+      expect(lastTimerDisplayProps().showSaveButton).toBe(false);
+      expect(mocks.createPendingRecord).toHaveBeenCalledTimes(1);
+      expect(mocks.savePendingRecord).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('timer expired while the tab was closed', () => {
     const expiredBatchId = (targetTime: number) =>
       `00000000-0000-4000-8000-${targetTime.toString(16).padStart(12, '0').slice(-12)}`;

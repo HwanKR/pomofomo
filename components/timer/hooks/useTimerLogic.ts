@@ -170,6 +170,7 @@ export const useTimerLogic = ({
 
     setTimeLeft(newTime);
     if (mode === 'focus') setFocusLoggedSeconds(0);
+    return newTime;
   }, [isRunning, settings]);
 
   return {
