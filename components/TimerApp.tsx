@@ -241,6 +241,10 @@ export default function TimerApp({
   // (once per mount per account).
   const storageOwner = isLoggedIn ? getStorageOwner() : GUEST_OWNER;
   const hasSyncedRef = useRef(false);
+  // Version session transitions so a delayed save can only reset the state
+  // that created its record. Comparing displayed values would miss a
+  // restart/pause or reset cycle that happens to return to the same values.
+  const sessionRevisionRef = useRef(0);
   // Guards the task-persistence effect below: stays false until a real
   // (restored or user-made) task selection has been seen for this owner.
   const taskStateDirtyRef = useRef(false);
@@ -286,6 +290,7 @@ export default function TimerApp({
     currentIntervals: { start: number; end: number }[],
     currentStart: number | null // NEW PARAMETER
   ) => {
+    sessionRevisionRef.current += 1;
     // Stamp from the store, not the React `settings` closure: the preset
     // handler writes the store synchronously right before saving (the closure
     // still holds the pre-preset durations), and the expired-timer settle
@@ -593,7 +598,24 @@ export default function TimerApp({
     const additional = elapsed - focusLoggedSeconds;
 
     if (additional > 0) {
+      let savedRevision: number | null = null;
       const afterSave = () => {
+        // This callback also runs after retries, terminal rejections and task
+        // popup answers. The record can finish saving without owning the
+        // timer anymore; leave newer progress and its persisted state alone.
+        if (
+          savedRevision !== sessionRevisionRef.current ||
+          getStorageOwner() !== storageOwner
+        ) return;
+        const currentSettings = readSettingsSnapshot();
+        const currentFullTime = (timerMode === 'focus'
+          ? currentSettings.pomoTime
+          : timerMode === 'shortBreak'
+            ? currentSettings.shortBreak
+            : currentSettings.longBreak) * 60;
+        // Settings can change without a session snapshot being written.
+        if (currentFullTime !== fullTime) return;
+
         resetTimerManual();
         setIntervals([]);
         saveState(tab, timerMode, false, fullTime, null, cycleCount, 0, isStopwatchRunning, stopwatchTime, null, [], null);
@@ -606,6 +628,7 @@ export default function TimerApp({
         const newLogged = focusLoggedSeconds + additional;
         setFocusLoggedSeconds(newLogged);
         saveState(tab, timerMode, false, timeLeft, null, cycleCount, newLogged, isStopwatchRunning, stopwatchTime, null, [], null);
+        savedRevision = sessionRevisionRef.current;
       });
     }
   };
@@ -723,6 +746,11 @@ export default function TimerApp({
     stopwatchStartTimeRef.current = 0;
     currentIntervalStartRef.current = null;
     taskStateDirtyRef.current = false;
+    return () => {
+      // Invalidate callbacks on unmount and account changes, including an
+      // eventual return to the original account before a save resolves.
+      sessionRevisionRef.current += 1;
+    };
   }, [storageOwner, endTimeRef, stopwatchStartTimeRef, currentIntervalStartRef]);
 
   // Completion transition for a timer whose deadline passed while the tab was
@@ -1050,6 +1078,8 @@ export default function TimerApp({
 
               const remaining = duration - elapsed;
               if (remaining > 0) {
+                // Remote hydration does not write through saveState.
+                sessionRevisionRef.current += 1;
                 setTab('timer');
                 setTimerMode(mode);
                 setTimeLeft(remaining);
@@ -1063,6 +1093,7 @@ export default function TimerApp({
               }
             } else {
               // Sync Stopwatch (Default)
+              sessionRevisionRef.current += 1;
               setTab('stopwatch');
               setStopwatchTime(elapsed);
               setIsStopwatchRunning(true);
@@ -1088,6 +1119,7 @@ export default function TimerApp({
             } else {
               const remaining = duration - finalElapsed;
               if (remaining > 0) {
+                sessionRevisionRef.current += 1;
                 setTab('timer');
                 setTimerMode(mode);
                 setTimeLeft(remaining);
@@ -1104,6 +1136,7 @@ export default function TimerApp({
               console.log(`[Sync] 로컬 스톱워치 시간(${localElapsed}s)이 DB(${serverTime}s)보다 큼. 로컬 값 유지.`);
             } else if (maxTime > 0) {
               // 서버 시간이 더 클 때만 업데이트
+              sessionRevisionRef.current += 1;
               setTab('stopwatch');
               setStopwatchTime(maxTime);
               setIsStopwatchRunning(false);

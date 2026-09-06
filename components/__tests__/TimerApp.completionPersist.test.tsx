@@ -1,5 +1,7 @@
-import { render, act } from '@testing-library/react';
+import { render, act, fireEvent } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import toast from 'react-hot-toast';
 import TimerApp from '../TimerApp';
 
 // Regression tests for the stale post-completion storage state:
@@ -12,6 +14,7 @@ import TimerApp from '../TimerApp';
 
 const mocks = vi.hoisted(() => ({
   timerDisplayProps: [] as Record<string, unknown>[],
+  taskModalProps: [] as Record<string, unknown>[],
   playAlarm: vi.fn(),
   playClickSound: vi.fn(),
   updateStatus: vi.fn(),
@@ -127,7 +130,10 @@ vi.mock('@/components/TaskSidebar', () => ({
 }));
 
 vi.mock('@/components/timer/ui/TaskModal', () => ({
-  TaskModal: () => null,
+  TaskModal: (props: Record<string, unknown>) => {
+    mocks.taskModalProps.push(props);
+    return null;
+  },
 }));
 
 vi.mock('@/components/timer/ui/TimerDisplay', () => ({
@@ -149,6 +155,7 @@ vi.mock('react-hot-toast', () => {
   const toastFn = Object.assign(vi.fn(), {
     error: vi.fn(),
     success: vi.fn(),
+    dismiss: vi.fn(),
   });
   return { default: toastFn };
 });
@@ -223,6 +230,7 @@ describe('TimerApp completion persistence', () => {
     );
     mocks.savePendingRecord.mockResolvedValue('saved');
     mocks.timerDisplayProps.length = 0;
+    mocks.taskModalProps.length = 0;
     mocks.currentIntervalStartRef.current = null;
     mocks.settings.taskPopupEnabled = false;
     mocks.settings.pomoTime = 25;
@@ -233,6 +241,7 @@ describe('TimerApp completion persistence', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   it('creates and saves the record once at completion, stamped with the real end time', async () => {
@@ -304,6 +313,209 @@ describe('TimerApp completion persistence', () => {
     expect(saved.timer.mode).toBe('shortBreak');
     expect(saved.timer.isRunning).toBe(false);
     expect(saved.timer.targetTime).toBeNull();
+  });
+
+  describe('late manual save responses', () => {
+    const stateKey = 'fomopomo_full_state::user-1';
+    const lastTimerProps = () => mocks.timerDisplayProps.at(-1)!;
+    const readSavedState = () => JSON.parse(window.localStorage.getItem(stateKey)!);
+    const clickTimer = (name: string) => (lastTimerProps()[name] as () => void)();
+    const deferredSave = () => {
+      let resolve!: (value: 'saved' | 'rejected' | 'failed') => void;
+      const promise = new Promise<'saved' | 'rejected' | 'failed'>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    };
+    const mountPausedFocus = async () => {
+      seedTimerState({
+        isRunning: false,
+        secondsLeft: 15 * 60,
+        intervals: [{ start: Date.now() - 10 * 60_000, end: Date.now() }],
+      });
+      window.localStorage.setItem(stateKey, JSON.stringify({
+        ...savedFullState(), ownerUserId: 'user-1',
+      }));
+      window.localStorage.removeItem('fomopomo_full_state');
+      const view = render(
+        <TimerApp settingsUpdated={0} onRecordSaved={vi.fn()} isLoggedIn={true} />
+      );
+      await act(async () => {});
+      expect(lastTimerProps().showSaveButton).toBe(true);
+      return view;
+    };
+
+    beforeEach(() => {
+      vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'https://review.supabase.co');
+      window.localStorage.setItem('sb-review-auth-token', JSON.stringify({ user: { id: 'user-1' } }));
+    });
+
+    it.each(['saved', 'rejected'] as const)('preserves a restarted timer when the old record is %s', async (outcome) => {
+      const response = deferredSave();
+      mocks.savePendingRecord.mockReturnValueOnce(response.promise);
+      await mountPausedFocus();
+      await act(async () => clickTimer('onSaveTimer'));
+      expect(readSavedState().timer.loggedSeconds).toBe(600);
+      await act(async () => clickTimer('onToggleTimer'));
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      const snapshot = readSavedState();
+      const intervalStart = mocks.currentIntervalStartRef.current;
+      const statusCalls = mocks.updateStatus.mock.calls.length;
+
+      await act(async () => response.resolve(outcome));
+
+      expect(lastTimerProps().isRunning).toBe(true);
+      expect(lastTimerProps().timeLeft).toBe(14 * 60);
+      expect(mocks.currentIntervalStartRef.current).toBe(intervalStart);
+      expect(readSavedState()).toEqual(snapshot);
+      expect(mocks.updateStatus).toHaveBeenCalledTimes(statusCalls);
+      await act(async () => clickTimer('onToggleTimer'));
+      expect(lastTimerProps().showSaveButton).toBe(true);
+      await act(async () => clickTimer('onSaveTimer'));
+      expect(mocks.createPendingRecord).toHaveBeenLastCalledWith('pomo', 60, Date.now());
+    });
+
+    it('preserves new paused progress even when the timer is no longer running', async () => {
+      const response = deferredSave();
+      mocks.savePendingRecord.mockReturnValueOnce(response.promise);
+      await mountPausedFocus();
+      await act(async () => clickTimer('onSaveTimer'));
+      await act(async () => clickTimer('onToggleTimer'));
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      await act(async () => clickTimer('onToggleTimer'));
+      const snapshot = readSavedState();
+      expect(snapshot.intervals).toHaveLength(1);
+
+      await act(async () => response.resolve('saved'));
+
+      expect(lastTimerProps().isRunning).toBe(false);
+      expect(lastTimerProps().timeLeft).toBe(14 * 60);
+      expect(lastTimerProps().showSaveButton).toBe(true);
+      expect(readSavedState()).toEqual(snapshot);
+    });
+
+    it.each(['mode', 'preset'] as const)('preserves a newer %s selection', async (change) => {
+      const response = deferredSave();
+      mocks.savePendingRecord.mockReturnValueOnce(response.promise);
+      await mountPausedFocus();
+      await act(async () => clickTimer('onSaveTimer'));
+      await act(async () => {
+        if (change === 'mode') (lastTimerProps().onChangeMode as (mode: string) => void)('shortBreak');
+        else (lastTimerProps().onPresetClick as (minutes: number) => void)(50);
+      });
+      const snapshot = readSavedState();
+
+      await act(async () => response.resolve('saved'));
+
+      expect(lastTimerProps().timerMode).toBe(change === 'mode' ? 'shortBreak' : 'focus');
+      expect(lastTimerProps().timeLeft).toBe((change === 'mode' ? 5 : 50) * 60);
+      expect(readSavedState()).toEqual(snapshot);
+    });
+
+    it('still resets the saved timer when nothing changed while saving', async () => {
+      const response = deferredSave();
+      mocks.savePendingRecord.mockReturnValueOnce(response.promise);
+      await mountPausedFocus();
+      await act(async () => clickTimer('onSaveTimer'));
+      expect(lastTimerProps().timeLeft).toBe(15 * 60);
+      expect(lastTimerProps().showSaveButton).toBe(false);
+
+      await act(async () => response.resolve('saved'));
+
+      expect(lastTimerProps().timeLeft).toBe(25 * 60);
+      expect(lastTimerProps().isRunning).toBe(false);
+      expect(readSavedState().timer).toMatchObject({ timeLeft: 1500, loggedSeconds: 0 });
+    });
+
+    it('does not overwrite a remounted timer or its persisted progress', async () => {
+      const response = deferredSave();
+      mocks.savePendingRecord.mockReturnValueOnce(response.promise);
+      const view = await mountPausedFocus();
+      await act(async () => clickTimer('onSaveTimer'));
+      view.unmount();
+      render(<TimerApp settingsUpdated={0} onRecordSaved={vi.fn()} isLoggedIn={true} />);
+      await act(async () => {});
+      await act(async () => clickTimer('onToggleTimer'));
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      const snapshot = readSavedState();
+
+      await act(async () => response.resolve('saved'));
+
+      expect(lastTimerProps().isRunning).toBe(true);
+      expect(lastTimerProps().timeLeft).toBe(14 * 60);
+      expect(readSavedState()).toEqual(snapshot);
+    });
+
+    it('does not change the guest timer or old account snapshot after logout', async () => {
+      const response = deferredSave();
+      mocks.savePendingRecord.mockReturnValueOnce(response.promise);
+      const view = await mountPausedFocus();
+      await act(async () => clickTimer('onSaveTimer'));
+      const accountSnapshot = readSavedState();
+      window.localStorage.removeItem('sb-review-auth-token');
+      view.rerender(<TimerApp settingsUpdated={0} onRecordSaved={vi.fn()} isLoggedIn={false} />);
+      await act(async () => {});
+      await act(async () => clickTimer('onToggleTimer'));
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      const guestSnapshot = savedFullState();
+
+      await act(async () => response.resolve('saved'));
+
+      expect(lastTimerProps().isRunning).toBe(true);
+      expect(lastTimerProps().timeLeft).toBe(24 * 60);
+      expect(savedFullState()).toEqual(guestSnapshot);
+      expect(readSavedState()).toEqual(accountSnapshot);
+    });
+
+    it('keeps a newer session when retrying the old record succeeds', async () => {
+      mocks.savePendingRecord.mockResolvedValueOnce('failed');
+      await mountPausedFocus();
+      await act(async () => clickTimer('onSaveTimer'));
+      const record = mocks.savePendingRecord.mock.calls[0][0];
+      const retryContent = vi.mocked(toast).mock.calls.at(-1)![0] as (value: { id: string }) => ReactNode;
+      const retryView = render(retryContent({ id: 'retry-old-record' }));
+      await act(async () => clickTimer('onToggleTimer'));
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      const snapshot = readSavedState();
+
+      await act(async () => {
+        fireEvent.click(retryView.getByRole('button', { name: '재시도' }));
+      });
+
+      expect(mocks.savePendingRecord).toHaveBeenLastCalledWith(record, '', null);
+      expect(lastTimerProps().isRunning).toBe(true);
+      expect(lastTimerProps().timeLeft).toBe(14 * 60);
+      expect(readSavedState()).toEqual(snapshot);
+    });
+
+    it.each(['onSave', 'onSkip', 'onDisablePopup'] as const)('retains normal reset behavior after the task popup %s action', async (action) => {
+      mocks.settings.taskPopupEnabled = true;
+      const persistSettings = mocks.useSettingsResult!.persistSettings as ReturnType<typeof vi.fn>;
+      if (action === 'onDisablePopup') persistSettings.mockResolvedValueOnce(true);
+      const response = deferredSave();
+      mocks.savePendingRecord.mockReturnValueOnce(response.promise);
+      await mountPausedFocus();
+      await act(async () => clickTimer('onSaveTimer'));
+      expect(mocks.taskModalProps.at(-1)!.isOpen).toBe(true);
+      expect(mocks.savePendingRecord).not.toHaveBeenCalled();
+      let submitted!: Promise<void>;
+      await act(async () => {
+        submitted = (mocks.taskModalProps.at(-1)![action] as () => Promise<void>)();
+      });
+      expect(lastTimerProps().timeLeft).toBe(15 * 60);
+
+      await act(async () => {
+        response.resolve('saved');
+        await submitted;
+      });
+
+      expect(lastTimerProps().timeLeft).toBe(25 * 60);
+      expect(lastTimerProps().isRunning).toBe(false);
+      expect(mocks.taskModalProps.at(-1)!.isOpen).toBe(false);
+      expect(readSavedState().timer).toMatchObject({ timeLeft: 1500, loggedSeconds: 0 });
+      expect(mocks.createPendingRecord).toHaveBeenCalledTimes(1);
+      expect(mocks.savePendingRecord).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('manual mode switch persistence', () => {
