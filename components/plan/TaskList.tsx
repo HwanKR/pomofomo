@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { format } from 'date-fns';
 import {
   Check,
@@ -280,14 +280,48 @@ interface TaskListProps {
 }
 
 export default function TaskList({ selectedDate, userId }: TaskListProps) {
+  const selectedDateKey = format(selectedDate, 'yyyy-MM-dd');
+
+  // A new owner/date gets fresh UI state, including drafts and confirmations.
+  // Returning to an earlier key still creates a new request lifetime.
+  return (
+    <ScopedTaskList
+      key={`${userId}:${selectedDateKey}`}
+      selectedDateKey={selectedDateKey}
+      userId={userId}
+    />
+  );
+}
+
+const createRequestScope = () => ({
+  active: true,
+  taskRequest: 0,
+  taskReadPending: false,
+  pinnedRequest: 0,
+  mutations: 0,
+  refreshTasks: false,
+  refreshPinned: false,
+});
+
+function ScopedTaskList({ selectedDateKey, userId }: {
+  selectedDateKey: string;
+  userId: string;
+}) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [isAdding, setIsAdding] = useState(false);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [pinnedTasks, setPinnedTasks] = useState<PinnedTask[]>([]);
+  const scopeRef = useRef<ReturnType<typeof createRequestScope> | null>(null);
 
-  const selectedDateKey = format(selectedDate, 'yyyy-MM-dd');
+  useLayoutEffect(() => {
+    const scope = createRequestScope();
+    scopeRef.current = scope;
+    // Use a new object on every setup: StrictMode cleanup must permanently
+    // invalidate the work started by its previous setup.
+    return () => { scope.active = false; };
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -297,6 +331,14 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
   );
 
   const fetchPinnedTasks = useCallback(async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
+    if (scope.mutations > 0) {
+      scope.refreshPinned = true;
+      return;
+    }
+    const request = ++scope.pinnedRequest;
+    const isCurrent = () => scope.active && request === scope.pinnedRequest;
     if (!userId) {
       setPinnedTasks([]);
       return;
@@ -308,6 +350,7 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
       .eq('user_id', userId)
       .order('position', { ascending: true });
 
+    if (!isCurrent()) return;
     if (error) {
       console.error('Error fetching pinned tasks:', error);
       return;
@@ -317,12 +360,21 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
   }, [userId]);
 
   const fetchTasks = useCallback(async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
+    if (scope.mutations > 0) {
+      scope.refreshTasks = true;
+      return;
+    }
+    const request = ++scope.taskRequest;
+    const isCurrent = () => scope.active && request === scope.taskRequest;
     if (!userId) {
       setTasks([]);
       setLoading(false);
       return;
     }
 
+    scope.taskReadPending = true;
     setLoading(true);
 
     const { data: pinnedData, error: pinnedError } = await supabase
@@ -331,6 +383,7 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
       .eq('user_id', userId)
       .order('position', { ascending: true });
 
+    if (!isCurrent()) return;
     if (pinnedError) {
       console.error('Error fetching pinned tasks for task list:', pinnedError);
     }
@@ -347,8 +400,10 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
       .order('position', { ascending: true })
       .order('created_at', { ascending: true });
 
+    if (!isCurrent()) return;
     if (taskError) {
       console.error('Error fetching tasks:', taskError);
+      scope.taskReadPending = false;
       setLoading(false);
       return;
     }
@@ -381,6 +436,7 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
           'id, title, status, estimated_pomodoros, position, source_subtask_id'
         );
 
+      if (!isCurrent()) return;
       if (insertError) {
         console.error('Error auto-creating pinned tasks:', insertError);
       } else {
@@ -405,6 +461,7 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
         .select('id, long_term_tasks(title)')
         .in('id', sourceSubtaskIds);
 
+      if (!isCurrent()) return;
       if (parentError) {
         console.error('Error fetching long-term task titles:', parentError);
       } else {
@@ -439,6 +496,7 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
         .eq('user_id', userId)
         .in('task_id', taskIds);
 
+      if (!isCurrent()) return;
       if (sessionsError) {
         console.error('Error fetching task study durations:', sessionsError);
       } else {
@@ -452,6 +510,7 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
       }
     }
 
+    scope.taskReadPending = false;
     setTasks(
       taskRows.map((task) => ({
         ...task,
@@ -461,11 +520,47 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
     setLoading(false);
   }, [selectedDateKey, userId]);
 
+  const beginMutation = (changesPins = false) => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return null;
+    // Reads already in flight cannot overwrite local changes. Realtime
+    // refreshes during writes are deferred until all current writes settle.
+    scope.taskRequest += 1;
+    scope.refreshTasks ||= scope.taskReadPending;
+    scope.taskReadPending = false;
+    if (changesPins) {
+      scope.pinnedRequest += 1;
+      scope.refreshPinned = true;
+    }
+    scope.mutations += 1;
+    setLoading(false);
+    return scope;
+  };
+
+  const finishMutation = (scope: ReturnType<typeof createRequestScope>) => {
+    if (!scope.active) return;
+    scope.mutations -= 1;
+    if (scope.mutations > 0) return;
+    if (scope.refreshTasks) {
+      scope.refreshTasks = false;
+      void fetchTasks();
+    }
+    if (scope.refreshPinned) {
+      scope.refreshPinned = false;
+      void fetchPinnedTasks();
+    }
+  };
+
   useEffect(() => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
     const initialFetch = setTimeout(() => {
+      if (!scope.active) return;
       void fetchTasks();
       void fetchPinnedTasks();
     }, 0);
+
+    if (!userId) return () => clearTimeout(initialFetch);
 
     const taskChannel = supabase
       .channel('task-list-updates')
@@ -478,6 +573,7 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
           filter: `user_id=eq.${userId}`,
         },
         () => {
+          if (!scope.active) return;
           void fetchTasks();
         }
       )
@@ -494,6 +590,7 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
           filter: `user_id=eq.${userId}`,
         },
         () => {
+          if (!scope.active) return;
           void fetchTasks();
         }
       )
@@ -508,55 +605,59 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
 
   const pinTaskFromTask = async (task: Task) => {
     if (!userId) return;
+    const scope = beginMutation(true);
+    if (!scope) return;
 
-    const existingPinned = pinnedTasks.find(
-      (pinnedTask) => pinnedTask.title === task.title
-    );
+    try {
+      const existingPinned = pinnedTasks.find(
+        (pinnedTask) => pinnedTask.title === task.title
+      );
 
-    if (existingPinned) {
-      const { error } = await supabase
-        .from('pinned_tasks')
-        .delete()
-        .eq('id', existingPinned.id);
+      if (existingPinned) {
+        const { error } = await supabase
+          .from('pinned_tasks')
+          .delete()
+          .eq('id', existingPinned.id);
 
-      if (error) {
-        console.error('Error unpinning task:', error);
+        if (!scope.active) return;
+        if (error) throw error;
+
+        setPinnedTasks((currentPinnedTasks) =>
+          currentPinnedTasks.filter(
+            (pinnedTask) => pinnedTask.id !== existingPinned.id
+          )
+        );
         return;
       }
 
-      setPinnedTasks((currentPinnedTasks) =>
-        currentPinnedTasks.filter(
-          (pinnedTask) => pinnedTask.id !== existingPinned.id
-        )
-      );
-      return;
+      const maxPosition =
+        pinnedTasks.length > 0
+          ? Math.max(...pinnedTasks.map((pinnedTask) => pinnedTask.position))
+          : -1;
+
+      const { data, error } = await supabase
+        .from('pinned_tasks')
+        .insert({
+          user_id: userId,
+          title: task.title,
+          position: maxPosition + 1,
+        })
+        .select('id, title, position')
+        .single();
+
+      if (!scope.active) return;
+      if (error) throw error;
+
+      const createdPinnedTask = normalizePinnedTaskRows([data as PinnedTaskRow])[0];
+      setPinnedTasks((currentPinnedTasks) => [
+        ...currentPinnedTasks,
+        createdPinnedTask,
+      ]);
+    } catch (error) {
+      if (scope.active) console.error('Error changing pinned task:', error);
+    } finally {
+      finishMutation(scope);
     }
-
-    const maxPosition =
-      pinnedTasks.length > 0
-        ? Math.max(...pinnedTasks.map((pinnedTask) => pinnedTask.position))
-        : -1;
-
-    const { data, error } = await supabase
-      .from('pinned_tasks')
-      .insert({
-        user_id: userId,
-        title: task.title,
-        position: maxPosition + 1,
-      })
-      .select('id, title, position')
-      .single();
-
-    if (error) {
-      console.error('Error pinning task:', error);
-      return;
-    }
-
-    const createdPinnedTask = normalizePinnedTaskRows([data as PinnedTaskRow])[0];
-    setPinnedTasks((currentPinnedTasks) => [
-      ...currentPinnedTasks,
-      createdPinnedTask,
-    ]);
   };
 
   const handleDragEnd = async (event: DragEndEvent) => {
@@ -568,6 +669,8 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
     const newIndex = tasks.findIndex((task) => task.id === over.id);
 
     if (oldIndex === -1 || newIndex === -1) return;
+    const scope = beginMutation();
+    if (!scope) return;
 
     const reorderedTasks = arrayMove(tasks, oldIndex, newIndex).map(
       (task, index) => ({
@@ -578,11 +681,22 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
 
     setTasks(reorderedTasks);
 
-    await Promise.all(
-      reorderedTasks.map((task) =>
-        supabase.from('tasks').update({ position: task.position }).eq('id', task.id)
-      )
-    );
+    try {
+      const results = await Promise.all(
+        reorderedTasks.map((task) =>
+          supabase.from('tasks').update({ position: task.position }).eq('id', task.id)
+        )
+      );
+      if (!scope.active) return;
+      const error = results.find((result) => result.error)?.error;
+      if (error) throw error;
+    } catch (error) {
+      if (!scope.active) return;
+      console.error('Error reordering tasks:', error);
+      scope.refreshTasks = true;
+    } finally {
+      finishMutation(scope);
+    }
   };
 
   const addTask = async (event: React.FormEvent) => {
@@ -592,36 +706,44 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
       alert('작업을 추가하려면 로그인해주세요.');
       return;
     }
+    const scope = beginMutation();
+    if (!scope) return;
 
     const maxPosition =
       tasks.length > 0 ? Math.max(...tasks.map((task) => task.position)) : -1;
 
-    const { data, error } = await supabase
-      .from('tasks')
-      .insert({
-        user_id: userId,
-        title: newTaskTitle.trim(),
-        due_date: selectedDateKey,
-        status: 'todo',
-        position: maxPosition + 1,
-      })
-      .select(
-        'id, title, status, estimated_pomodoros, position, source_subtask_id'
-      )
-      .single();
+    try {
+      const { data, error } = await supabase
+        .from('tasks')
+        .insert({
+          user_id: userId,
+          title: newTaskTitle.trim(),
+          due_date: selectedDateKey,
+          status: 'todo',
+          position: maxPosition + 1,
+        })
+        .select(
+          'id, title, status, estimated_pomodoros, position, source_subtask_id'
+        )
+        .single();
 
-    if (error) {
-      console.error('Error adding task:', error);
-      return;
+      if (!scope.active) return;
+      if (error) throw error;
+
+      const createdTask = normalizeTaskRows([data as TaskRow])[0];
+      setTasks((currentTasks) => [...currentTasks, { ...createdTask, duration: 0 }]);
+      setNewTaskTitle('');
+      setIsAdding(false);
+    } catch (error) {
+      if (scope.active) console.error('Error adding task:', error);
+    } finally {
+      finishMutation(scope);
     }
-
-    const createdTask = normalizeTaskRows([data as TaskRow])[0];
-    setTasks((currentTasks) => [...currentTasks, { ...createdTask, duration: 0 }]);
-    setNewTaskTitle('');
-    setIsAdding(false);
   };
 
   const toggleTaskStatus = async (task: Task) => {
+    const scope = beginMutation();
+    if (!scope) return;
     const nextStatus = task.status === 'done' ? 'todo' : 'done';
     setTasks((currentTasks) =>
       currentTasks.map((currentTask) =>
@@ -631,51 +753,70 @@ export default function TaskList({ selectedDate, userId }: TaskListProps) {
       )
     );
 
-    const { error } = await supabase
-      .from('tasks')
-      .update({ status: nextStatus })
-      .eq('id', task.id);
-
-    if (error) {
+    try {
+      const { error } = await supabase
+        .from('tasks')
+        .update({ status: nextStatus })
+        .eq('id', task.id);
+      if (!scope.active) return;
+      if (error) throw error;
+    } catch (error) {
+      if (!scope.active) return;
       console.error('Error updating task:', error);
-      void fetchTasks();
+      scope.refreshTasks = true;
+    } finally {
+      finishMutation(scope);
     }
   };
 
   const updateTask = async (taskId: string, title: string) => {
+    const scope = beginMutation();
+    if (!scope) return;
     setTasks((currentTasks) =>
       currentTasks.map((task) =>
         task.id === taskId ? { ...task, title } : task
       )
     );
 
-    const { error } = await supabase
-      .from('tasks')
-      .update({ title })
-      .eq('id', taskId);
-
-    if (error) {
+    try {
+      const { error } = await supabase
+        .from('tasks')
+        .update({ title })
+        .eq('id', taskId);
+      if (!scope.active) return;
+      if (error) throw error;
+    } catch (error) {
+      if (!scope.active) return;
       console.error('Error updating task:', error);
-      void fetchTasks();
+      scope.refreshTasks = true;
+    } finally {
+      finishMutation(scope);
     }
   };
 
   const confirmDelete = async () => {
     if (!deletingTaskId) return;
+    const scope = beginMutation();
+    if (!scope) return;
 
     const taskId = deletingTaskId;
     setTasks((currentTasks) =>
       currentTasks.filter((task) => task.id !== taskId)
     );
 
-    const { error } = await supabase
-      .from('tasks')
-      .delete()
-      .eq('id', taskId);
-
-    if (error) {
+    try {
+      const { error } = await supabase
+        .from('tasks')
+        .delete()
+        .eq('id', taskId);
+      if (!scope.active) return;
+      if (error) throw error;
+    } catch (error) {
+      if (!scope.active) return;
       console.error('Error deleting task:', error);
-      void fetchTasks();
+      scope.refreshTasks = true;
+    } finally {
+      finishMutation(scope);
     }
   };
 

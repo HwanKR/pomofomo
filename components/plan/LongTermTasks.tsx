@@ -292,15 +292,45 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
     () => new Set()
   );
 
-  // 소유자가 바뀌는 렌더에서 즉시 세대를 올리고 목록을 비워, 이전 사용자의
-  // 진행 중 fetch가 새 사용자 화면에 낡은 데이터를 그리지 못하게 한다.
-  const [ownerUserId, setOwnerUserId] = useState(userId);
-  if (ownerUserId !== userId) {
-    setOwnerUserId(userId);
+  // Owner identity and component lifetime are independent of read ordering.
+  // A new object also makes A -> B -> A a new scope for old callbacks.
+  const [ownerScope, setOwnerScope] = useState(() => ({ userId }));
+  const currentOwnerScopeRef = useRef(ownerScope);
+  const lifecycleGenerationRef = useRef(0);
+  const mountedRef = useRef(true);
+  if (ownerScope.userId !== userId) {
+    const nextScope = { userId };
+    setOwnerScope(nextScope);
+    currentOwnerScopeRef.current = nextScope;
+    lifecycleGenerationRef.current += 1;
     fetchEpochRef.current += 1;
     setTasks([]);
     setLoading(true);
+    setNewTaskTitle('');
+    setIsAdding(false);
+    setDeletingTaskId(null);
+    setDeletingSubtaskId(null);
+    setEditingTaskId(null);
+    setEditedTitle('');
+    setAddingSubtaskTaskId(null);
+    setNewSubtaskTitle('');
+    pendingSubtaskIdsRef.current = new Set();
+    setPendingSubtaskIds(new Set());
   }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      lifecycleGenerationRef.current += 1;
+    };
+  }, []);
+
+  const isCurrentScope = useCallback((generation: number) =>
+    mountedRef.current &&
+    currentOwnerScopeRef.current === ownerScope &&
+    lifecycleGenerationRef.current === generation,
+  [ownerScope]);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -309,7 +339,10 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
     })
   );
 
-  const fetchTasks = useCallback(async () => {
+  const fetchTasks = useCallback(async (generation = lifecycleGenerationRef.current) => {
+    // Reject old subscription/error callbacks before they can issue a query
+    // or invalidate a current owner's in-flight read.
+    if (!isCurrentScope(generation)) return;
     const epoch = ++fetchEpochRef.current;
 
     if (!userId) {
@@ -329,7 +362,7 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
       .order('position', { ascending: true });
 
     // 더 새로운 fetch나 로컬 변경 커밋이 세대를 올렸다면 이 응답은 이미 낡았다.
-    if (epoch !== fetchEpochRef.current) return;
+    if (!isCurrentScope(generation) || epoch !== fetchEpochRef.current) return;
 
     if (error) {
       console.error('Error fetching long term tasks:', error);
@@ -339,11 +372,12 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
 
     setTasks(normalizeTaskRows(data as LongTermTaskRow[]));
     setLoading(false);
-  }, [userId]);
+  }, [userId, isCurrentScope]);
 
   useEffect(() => {
+    const generation = lifecycleGenerationRef.current;
     const initialFetch = setTimeout(() => {
-      void fetchTasks();
+      void fetchTasks(generation);
     }, 0);
 
     const taskChannel = supabase
@@ -357,7 +391,7 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
           filter: `user_id=eq.${userId}`,
         },
         () => {
-          void fetchTasks();
+          void fetchTasks(generation);
         }
       )
       .subscribe();
@@ -375,7 +409,7 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
           filter: `user_id=eq.${userId}`,
         },
         () => {
-          void fetchTasks();
+          void fetchTasks(generation);
         }
       )
       .subscribe();
@@ -388,6 +422,8 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
   }, [fetchTasks, userId]);
 
   const addTask = async (event: React.FormEvent) => {
+    const generation = lifecycleGenerationRef.current;
+    if (!isCurrentScope(generation)) return;
     event.preventDefault();
     if (!newTaskTitle.trim()) return;
     if (!userId) {
@@ -407,6 +443,8 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
       })
       .select(TASK_SELECT)
       .single();
+
+    if (!isCurrentScope(generation)) return;
 
     if (error) {
       console.error('Error adding long term task:', error);
@@ -444,6 +482,8 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
   };
 
   const updateTask = async () => {
+    const generation = lifecycleGenerationRef.current;
+    if (!isCurrentScope(generation)) return;
     if (!editingTaskId || !editedTitle.trim()) {
       cancelEditing();
       return;
@@ -473,13 +513,17 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
       .update({ title: nextTitle })
       .eq('id', taskId);
 
+    if (!isCurrentScope(generation)) return;
+
     if (error) {
       console.error('Error updating long term task:', error);
-      void fetchTasks();
+      void fetchTasks(generation);
     }
   };
 
   const confirmDeleteTask = async () => {
+    const generation = lifecycleGenerationRef.current;
+    if (!isCurrentScope(generation)) return;
     if (!deletingTaskId) return;
 
     const taskId = deletingTaskId;
@@ -487,6 +531,8 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
       .from('long_term_tasks')
       .delete()
       .eq('id', taskId);
+
+    if (!isCurrentScope(generation)) return;
 
     if (error) {
       console.error('Error deleting long term task:', error);
@@ -502,6 +548,8 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
   };
 
   const addSubtask = async (event: React.FormEvent, taskId: string) => {
+    const generation = lifecycleGenerationRef.current;
+    if (!isCurrentScope(generation)) return;
     event.preventDefault();
     if (!newSubtaskTitle.trim()) return;
     if (!userId) {
@@ -527,6 +575,8 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
       })
       .select(SUBTASK_SELECT)
       .single();
+
+    if (!isCurrentScope(generation)) return;
 
     if (error) {
       console.error('Error adding long term subtask:', error);
@@ -560,6 +610,8 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
   };
 
   const toggleSubtask = async (subtask: LongTermSubtaskItem) => {
+    const generation = lifecycleGenerationRef.current;
+    if (!isCurrentScope(generation)) return;
     const subtaskId = subtask.id;
     // 같은 세부 할 일의 토글은 직렬화한다. 진행 중이면 이후 클릭은 무시되고
     // (버튼도 비활성화됨) 완료 후의 새 렌더에서 다시 토글할 수 있다.
@@ -596,6 +648,7 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
         nextCompletedAt
       );
     } catch (error) {
+      if (!isCurrentScope(generation)) return;
       console.error('Error toggling subtask completion:', error);
       // 우리가 그린 낙관적 값이 아직 남아 있을 때만 되돌린다. 그 사이
       // refetch나 다른 갱신이 상태를 차지했다면 롤백이 그것을 덮으면 안 된다.
@@ -610,14 +663,18 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
           ),
         }))
       );
-      void fetchTasks();
+      void fetchTasks(generation);
     } finally {
-      pendingSubtaskIdsRef.current.delete(subtaskId);
-      setPendingSubtaskIds(new Set(pendingSubtaskIdsRef.current));
+      if (isCurrentScope(generation)) {
+        pendingSubtaskIdsRef.current.delete(subtaskId);
+        setPendingSubtaskIds(new Set(pendingSubtaskIdsRef.current));
+      }
     }
   };
 
   const updateSubtask = async (subtaskId: string, title: string) => {
+    const generation = lifecycleGenerationRef.current;
+    if (!isCurrentScope(generation)) return;
     // 이름 변경 전에 시작된 refetch가 커밋한 제목을 덮어쓰지 못하게 한다.
     fetchEpochRef.current += 1;
     setTasks((currentTasks) =>
@@ -635,13 +692,17 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
       .update({ title })
       .eq('id', subtaskId);
 
+    if (!isCurrentScope(generation)) return;
+
     if (error) {
       console.error('Error updating long term subtask:', error);
-      void fetchTasks();
+      void fetchTasks(generation);
     }
   };
 
   const confirmDeleteSubtask = async () => {
+    const generation = lifecycleGenerationRef.current;
+    if (!isCurrentScope(generation)) return;
     if (!deletingSubtaskId) return;
 
     const subtaskId = deletingSubtaskId;
@@ -649,6 +710,8 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
       .from('long_term_subtasks')
       .delete()
       .eq('id', subtaskId);
+
+    if (!isCurrentScope(generation)) return;
 
     if (error) {
       console.error('Error deleting long term subtask:', error);
@@ -667,6 +730,8 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
   };
 
   const handleSubtaskDragEnd = async (taskId: string, event: DragEndEvent) => {
+    const generation = lifecycleGenerationRef.current;
+    if (!isCurrentScope(generation)) return;
     const { active, over } = event;
 
     if (!over) return;
@@ -695,8 +760,10 @@ export default function LongTermTasks({ userId }: LongTermTasksProps) {
     // 위치 쓰기가 하나라도 실패하면 일부만 반영됐을 수 있으므로 서버
     // 순서를 다시 읽어 낙관적 순서를 되돌린다.
     const persisted = await persistSubtaskPositions(reorderedSubtasks);
+
+    if (!isCurrentScope(generation)) return;
     if (!persisted) {
-      void fetchTasks();
+      void fetchTasks(generation);
     }
   };
 
