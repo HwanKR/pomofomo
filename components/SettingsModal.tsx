@@ -1,5 +1,6 @@
 ﻿'use client';
 
+import { signOutWithPushCleanup } from '@/lib/pushSubscriptionLifecycle';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
@@ -333,7 +334,7 @@ export default function SettingsModal({
       toast.success('계정이 삭제되었습니다. 이용해 주셔서 감사합니다.', { id: toastId, duration: 3000 });
 
       try {
-        await supabase.auth.signOut();
+        await signOutWithPushCleanup();
       } catch (error) {
         console.error('로그아웃 실패:', error);
       }

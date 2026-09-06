@@ -1,3 +1,4 @@
+import { signOutWithPushCleanup } from '@/lib/pushSubscriptionLifecycle';
 import { Session } from '@supabase/supabase-js';
 import { useState } from 'react';
 import { supabase } from '@/lib/supabase';
@@ -21,7 +22,7 @@ export default function FriendsDashboard({ session, onOpenLogin }: FriendsDashbo
   };
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    await signOutWithPushCleanup();
   };
 
   const { theme, isDarkMode, toggleDarkMode } = useTheme();

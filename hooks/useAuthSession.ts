@@ -1,3 +1,4 @@
+import { signOutWithPushCleanup } from '@/lib/pushSubscriptionLifecycle';
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Session } from '@supabase/supabase-js';
@@ -25,7 +26,7 @@ export function useAuthSession() {
 
           // If refresh token is invalid, sign out to clear storage
           if (isRefreshTokenError) {
-            await supabase.auth.signOut();
+            await signOutWithPushCleanup();
             setSession(null);
           }
         } else {

@@ -1,5 +1,6 @@
 'use client';
 
+import { signOutWithPushCleanup } from '@/lib/pushSubscriptionLifecycle';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useAuthSession } from '@/hooks/useAuthSession';
@@ -122,7 +123,7 @@ export default function GroupsPage() {
                 theme={theme}
                 isDarkMode={isDarkMode}
                 toggleDarkMode={toggleDarkMode}
-                onLogout={() => supabase.auth.signOut()}
+                onLogout={() => signOutWithPushCleanup()}
                 onOpenLogin={() => setIsLoginModalOpen(true)}
             />
             <div className="max-w-4xl mx-auto">

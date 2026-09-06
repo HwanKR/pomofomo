@@ -1,5 +1,6 @@
 'use client';
 
+import { signOutWithPushCleanup } from '@/lib/pushSubscriptionLifecycle';
 import Navbar from '@/components/Navbar';
 import { useTheme } from '@/components/ThemeProvider';
 import { supabase } from '@/lib/supabase';
@@ -31,7 +32,7 @@ export default function PrivacyPage() {
         theme={theme}
         isDarkMode={isDarkMode}
         toggleDarkMode={toggleDarkMode}
-        onLogout={() => supabase.auth.signOut()}
+        onLogout={() => signOutWithPushCleanup()}
         onOpenLogin={() => supabase.auth.signInWithOAuth({ provider: 'google' })}
       />
       

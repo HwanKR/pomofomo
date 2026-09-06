@@ -1,56 +1,36 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { syncPushSubscriptionMock, supabaseMock, toastMock } = vi.hoisted(() => {
-  const singleMock = vi.fn().mockResolvedValue({
-    data: { role: 'user' },
-    error: null,
-  });
+const { lifecycleMock, supabaseMock, toastMock } = vi.hoisted(() => {
+  const singleMock = vi.fn();
   const eqMock = vi.fn(() => ({ single: singleMock }));
   const selectMock = vi.fn(() => ({ eq: eqMock }));
-  const deleteEqMock = vi.fn(() => ({ eq: deleteEqMock }));
-  const deleteMock = vi.fn(() => ({ eq: deleteEqMock }));
-  const upsertMock = vi.fn().mockResolvedValue({ error: null });
-  const fromMock = vi.fn((table: string) => {
-    if (table === 'profiles') {
-      return { select: selectMock };
-    }
-
-    if (table === 'push_subscriptions') {
-      return { upsert: upsertMock, delete: deleteMock };
-    }
-
-    return { select: selectMock, upsert: upsertMock, delete: deleteMock };
-  });
-
+  const unsubscribeMock = vi.fn();
+  const stopLifecycleMock = vi.fn();
   return {
-    syncPushSubscriptionMock: vi.fn(),
-    toastMock: {
-      success: vi.fn(),
-      error: vi.fn(),
+    lifecycleMock: {
+      start: vi.fn(() => stopLifecycleMock),
+      sync: vi.fn(),
+      stop: stopLifecycleMock,
     },
+    toastMock: { success: vi.fn(), error: vi.fn() },
     supabaseMock: {
       auth: {
-        getUser: vi.fn().mockResolvedValue({
-          data: { user: null },
+        getUser: vi.fn(),
+        onAuthStateChange: vi.fn((callback: (event: string, session: { user: { id: string } } | null) => void) => {
+          void callback;
+          return { data: { subscription: { unsubscribe: unsubscribeMock } } };
         }),
       },
-      from: fromMock,
-      __mocks: {
-        deleteEqMock,
-        deleteMock,
-        eqMock,
-        fromMock,
-        selectMock,
-        singleMock,
-        upsertMock,
-      },
+      from: vi.fn(() => ({ select: selectMock })),
+      __mocks: { singleMock, unsubscribeMock },
     },
   };
 });
 
-vi.mock('@/lib/pushSubscriptionSync', () => ({
-  syncPushSubscription: syncPushSubscriptionMock,
+vi.mock('@/lib/pushSubscriptionLifecycle', () => ({
+  startPushSubscriptionLifecycle: lifecycleMock.start,
+  syncCurrentPushSubscription: lifecycleMock.sync,
 }));
 
 vi.mock('@/lib/supabase', () => ({
@@ -95,6 +75,11 @@ describe('NotificationManager', () => {
     vi.clearAllMocks();
     window.localStorage.clear();
     mockBrowserPermission('default');
+    supabaseMock.auth.getUser.mockResolvedValue({ data: { user: null } });
+    supabaseMock.__mocks.singleMock.mockReset();
+    supabaseMock.__mocks.singleMock.mockResolvedValue({ data: { role: 'user' }, error: null });
+    lifecycleMock.sync.mockReset();
+    lifecycleMock.sync.mockResolvedValue({ status: 'subscribed_new' });
   });
 
   afterEach(() => {
@@ -158,4 +143,86 @@ describe('NotificationManager', () => {
       expect(screen.queryByText('타이머 종료 알림')).not.toBeInTheDocument();
     });
   });
+  it('uses the shared lifecycle and releases both subscriptions on unmount', async () => {
+    const view = render(<NotificationManager mode="inline" />);
+    await waitFor(() => expect(lifecycleMock.start).toHaveBeenCalledTimes(1));
+    expect(navigator.serviceWorker.register).not.toHaveBeenCalled();
+    expect(lifecycleMock.sync).not.toHaveBeenCalled();
+    view.unmount();
+    expect(lifecycleMock.stop).toHaveBeenCalledTimes(1);
+    expect(supabaseMock.__mocks.unsubscribeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the shared manual sync after permission is granted and keeps the success UI', async () => {
+    vi.mocked(Notification.requestPermission).mockResolvedValue('granted');
+    render(<NotificationManager mode="inline" />);
+    fireEvent.click(await screen.findByRole('button', { name: '알림 권한 요청하기' }));
+    await waitFor(() => expect(lifecycleMock.sync).toHaveBeenCalledTimes(1));
+    expect(toastMock.success).toHaveBeenCalledWith('알림이 설정되었습니다.');
+    expect(screen.getByText('허용됨')).toBeInTheDocument();
+    expect(supabaseMock.from).not.toHaveBeenCalledWith('push_subscriptions');
+  });
+
+  it('does not show a new-subscription toast for an existing subscription', async () => {
+    vi.mocked(Notification.requestPermission).mockResolvedValue('granted');
+    lifecycleMock.sync.mockResolvedValue({ status: 'persisted_existing' });
+    render(<NotificationManager mode="inline" />);
+    fireEvent.click(await screen.findByRole('button', { name: '알림 권한 요청하기' }));
+    await waitFor(() => expect(lifecycleMock.sync).toHaveBeenCalledTimes(1));
+    expect(toastMock.success).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancelled', 'unsupported'])('silently ignores %s manual sync', async (status) => {
+    vi.mocked(Notification.requestPermission).mockResolvedValue('granted');
+    lifecycleMock.sync.mockResolvedValue({ status });
+    render(<NotificationManager mode="inline" />);
+    fireEvent.click(await screen.findByRole('button', { name: '알림 권한 요청하기' }));
+    await waitFor(() => expect(lifecycleMock.sync).toHaveBeenCalledTimes(1));
+    expect(toastMock.success).not.toHaveBeenCalled();
+    expect(toastMock.error).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['persist_failed', 'Notification permission is enabled, but saving the subscription failed. It will retry automatically.'],
+    ['cleanup_failed', 'Could not rotate notifications because the old subscription could not be cleaned up.'],
+    ['missing_user', 'You need to sign in before enabling notifications.'],
+    ['unsubscribe_failed', 'Could not replace the existing notification subscription.'],
+  ])('keeps the %s feedback from the lifecycle result', async (status, message) => {
+    vi.mocked(Notification.requestPermission).mockResolvedValue('granted');
+    lifecycleMock.sync.mockResolvedValue({ status });
+    render(<NotificationManager mode="inline" />);
+    fireEvent.click(await screen.findByRole('button', { name: '알림 권한 요청하기' }));
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith(message));
+  });
+
+  it('removes administrator controls immediately when the account signs out', async () => {
+    supabaseMock.auth.getUser.mockResolvedValue({ data: { user: { id: 'admin' } } });
+    supabaseMock.__mocks.singleMock.mockResolvedValue({ data: { role: 'admin' }, error: null });
+    render(<NotificationManager mode="inline" />);
+    fireEvent.click(await screen.findByRole('button', { name: '디버그 로그 보기' }));
+    expect(screen.getByRole('button', { name: '디버그 로그 숨기기' })).toBeInTheDocument();
+    const onAuth = supabaseMock.auth.onAuthStateChange.mock.calls[0][0] as (
+      event: string, session: { user: { id: string } } | null
+    ) => void;
+    act(() => onAuth('SIGNED_OUT', null));
+    expect(screen.queryByRole('button', { name: /디버그 로그/ })).not.toBeInTheDocument();
+  });
+
+  it('ignores an old admin lookup that finishes after an account switch', async () => {
+    let resolveAdmin!: (value: { data: { role: string }; error: null }) => void;
+    supabaseMock.auth.getUser.mockResolvedValue({ data: { user: { id: 'admin' } } });
+    supabaseMock.__mocks.singleMock.mockImplementationOnce(() => new Promise(resolve => {
+      resolveAdmin = resolve;
+    }));
+    render(<NotificationManager mode="inline" />);
+    await waitFor(() => expect(supabaseMock.__mocks.singleMock).toHaveBeenCalledTimes(1));
+    const onAuth = supabaseMock.auth.onAuthStateChange.mock.calls[0][0] as (
+      event: string, session: { user: { id: string } } | null
+    ) => void;
+    act(() => onAuth('SIGNED_IN', { user: { id: 'regular-user' } }));
+    await waitFor(() => expect(supabaseMock.__mocks.singleMock).toHaveBeenCalledTimes(2));
+    await act(async () => resolveAdmin({ data: { role: 'admin' }, error: null }));
+    expect(screen.queryByRole('button', { name: /디버그 로그/ })).not.toBeInTheDocument();
+  });
+
 });

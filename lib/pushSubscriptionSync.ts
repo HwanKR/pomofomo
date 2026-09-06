@@ -1,15 +1,18 @@
 'use client';
 
 export type PushSubscriptionSyncStatus =
+  | 'cancelled'
   | 'cleanup_failed'
   | 'invalid_vapid_key'
   | 'missing_user'
   | 'missing_vapid_key'
+  | 'ownership_failed'
   | 'persist_failed'
   | 'persisted_existing'
   | 'rotated'
   | 'subscribed_new'
   | 'subscribe_failed'
+  | 'unsupported'
   | 'unsubscribe_failed';
 
 export type PushSubscriptionSyncResult = {
@@ -19,6 +22,7 @@ export type PushSubscriptionSyncResult = {
 
 type PushSubscriptionSyncOptions = {
   getCurrentUserId: () => Promise<string | null>;
+  isCurrent?: () => boolean;
   log: (message: string) => void;
   persistSubscription: (subscription: PushSubscription) => Promise<void>;
   registration: ServiceWorkerRegistration;
@@ -115,13 +119,16 @@ export function keysMatch(
 async function persistMatchingSubscription(
   subscription: PushSubscription,
   persistSubscription: (subscription: PushSubscription) => Promise<void>,
-  log: (message: string) => void
+  log: (message: string) => void,
+  isCurrent: () => boolean
 ): Promise<PushSubscriptionSyncResult> {
   try {
     await persistSubscription(subscription);
+    if (!isCurrent()) return { status: 'cancelled' };
     log('Push subscription persisted');
     return { status: 'persisted_existing' };
   } catch (error) {
+    if (!isCurrent()) return { status: 'cancelled' };
     log('Push subscription persistence failed');
     return { error, status: 'persist_failed' };
   }
@@ -129,6 +136,7 @@ async function persistMatchingSubscription(
 
 export async function syncPushSubscription({
   getCurrentUserId,
+  isCurrent = () => true,
   log,
   persistSubscription,
   registration,
@@ -148,6 +156,7 @@ export async function syncPushSubscription({
   }
 
   const userId = await getCurrentUserId();
+  if (!isCurrent()) return { status: 'cancelled' };
 
   if (!userId) {
     log('No signed-in user for push subscription sync');
@@ -155,6 +164,7 @@ export async function syncPushSubscription({
   }
 
   const existingSubscription = await registration.pushManager.getSubscription();
+  if (!isCurrent()) return { status: 'cancelled' };
 
   if (existingSubscription) {
     const existingKey = getApplicationServerKeyBytes(existingSubscription);
@@ -164,7 +174,8 @@ export async function syncPushSubscription({
       return persistMatchingSubscription(
         existingSubscription,
         persistSubscription,
-        log
+        log,
+        isCurrent
       );
     }
 
@@ -179,6 +190,7 @@ export async function syncPushSubscription({
         endpoint: existingSubscription.endpoint,
         userId,
       });
+      if (!isCurrent()) return { status: 'cancelled' };
       log('Removed stored push subscription before rotation');
     } catch (error) {
       log('Failed to remove stored push subscription before rotation');
@@ -186,12 +198,9 @@ export async function syncPushSubscription({
     }
 
     try {
-      const didUnsubscribe = await existingSubscription.unsubscribe();
-
-      if (!didUnsubscribe) {
-        log('Push subscription unsubscribe returned false');
-        return { status: 'unsubscribe_failed' };
-      }
+      // false means the subscription was already inactive.
+      await existingSubscription.unsubscribe();
+      if (!isCurrent()) return { status: 'cancelled' };
     } catch (error) {
       log('Push subscription unsubscribe failed');
       return { error, status: 'unsubscribe_failed' };
@@ -210,6 +219,7 @@ export async function syncPushSubscription({
       applicationServerKey: applicationServerKeyBytes.buffer,
       userVisibleOnly: true,
     });
+    if (!isCurrent()) return { status: 'cancelled' };
     log('Created browser push subscription');
   } catch (error) {
     log('Push subscription creation failed');
@@ -218,8 +228,10 @@ export async function syncPushSubscription({
 
   try {
     await persistSubscription(newSubscription);
+    if (!isCurrent()) return { status: 'cancelled' };
     log('Push subscription persisted');
   } catch (error) {
+    if (!isCurrent()) return { status: 'cancelled' };
     log('Push subscription persistence failed');
     return { error, status: 'persist_failed' };
   }

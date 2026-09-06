@@ -7,10 +7,11 @@ import {
   useSyncExternalStore,
 } from 'react';
 import toast from 'react-hot-toast';
-import { syncPushSubscription } from '@/lib/pushSubscriptionSync';
+import {
+  startPushSubscriptionLifecycle,
+  syncCurrentPushSubscription,
+} from '@/lib/pushSubscriptionLifecycle';
 import { supabase } from '@/lib/supabase';
-
-const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? '';
 
 const subscribeToHydration = () => () => {};
 
@@ -46,70 +47,16 @@ export default function NotificationManager({
     console.log(message);
   }, []);
 
-  const getCurrentUserId = useCallback(async () => {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    return user?.id ?? null;
-  }, []);
-
-  const persistSubscription = useCallback(
-    async (subscription: PushSubscription) => {
-      const userId = await getCurrentUserId();
-
-      if (!userId) {
-        addLog('No user found');
-        throw new Error('A signed-in user is required to save notifications.');
-      }
-
-      const { error } = await supabase.from('push_subscriptions').upsert(
-        {
-          user_id: userId,
-          endpoint: subscription.endpoint,
-          keys: subscription.toJSON().keys,
-        },
-        { onConflict: 'endpoint' }
-      );
-
-      if (error) {
-        addLog('Push subscription persistence failed');
-        throw error;
-      }
-    },
-    [addLog, getCurrentUserId]
-  );
-
-  const removeStoredSubscription = useCallback(
-    async ({ endpoint, userId }: { endpoint: string; userId: string }) => {
-      const { error } = await supabase
-        .from('push_subscriptions')
-        .delete()
-        .eq('user_id', userId)
-        .eq('endpoint', endpoint);
-
-      if (error) {
-        addLog('Push subscription cleanup failed');
-        throw error;
-      }
-    },
-    [addLog]
-  );
-
   const subscribeUser = useCallback(
     async (showToast = true) => {
       if (!('serviceWorker' in navigator)) return;
 
       try {
-        const registration = await navigator.serviceWorker.ready;
-        const result = await syncPushSubscription({
-          getCurrentUserId,
-          log: addLog,
-          persistSubscription,
-          registration,
-          removeStoredSubscription,
-          vapidPublicKey: VAPID_PUBLIC_KEY,
-        });
+        const result = await syncCurrentPushSubscription(addLog);
+
+        if (result.status === 'cancelled' || result.status === 'unsupported') {
+          return;
+        }
 
         if (
           result.status === 'persisted_existing' ||
@@ -173,60 +120,82 @@ export default function NotificationManager({
         }
       }
     },
-    [
-      addLog,
-      getCurrentUserId,
-      persistSubscription,
-      removeStoredSubscription,
-    ]
+    [addLog]
   );
 
   useEffect(() => {
-    const syncAdminRole = async () => {
+    const stopLifecycle = startPushSubscriptionLifecycle(addLog);
+    const updatePermission = () => {
+      if ('Notification' in window) {
+        setPermission(Notification.permission);
+      }
+    };
+    const initialPermission = setTimeout(updatePermission, 0);
+    window.addEventListener('focus', updatePermission);
+
+    return () => {
+      clearTimeout(initialPermission);
+      window.removeEventListener('focus', updatePermission);
+      stopLifecycle();
+    };
+  }, [addLog]);
+
+  useEffect(() => {
+    let disposed = false;
+    let generation = 0;
+    let pendingCheck: ReturnType<typeof setTimeout> | undefined;
+
+    const checkAdminRole = async (userId: string, requestGeneration: number) => {
       try {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-
-        if (!user) return;
-
-        const { data: profile } = await supabase
+        const { data: profile, error } = await supabase
           .from('profiles')
           .select('role')
-          .eq('id', user.id)
+          .eq('id', userId)
           .single();
 
-        setIsAdmin(profile?.role === 'admin');
+        if (!disposed && generation === requestGeneration) {
+          setIsAdmin(!error && profile?.role === 'admin');
+        }
       } catch (error) {
         console.error('Error checking admin role:', error);
       }
     };
 
-    void syncAdminRole();
-
-    const registerServiceWorker = async () => {
-      if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
-        try {
-          await navigator.serviceWorker.register('/sw.js');
-          addLog('Service Worker registered');
-        } catch {
-          addLog('Service Worker registration failed');
-        }
-      }
-
-      if (typeof window !== 'undefined' && 'Notification' in window) {
-        const currentPermission = Notification.permission;
-        setPermission(currentPermission);
-        addLog(`Current permission: ${currentPermission}`);
-
-        if (currentPermission === 'granted') {
-          await subscribeUser(false);
-        }
+    const scheduleAdminCheck = (userId: string | null) => {
+      const requestGeneration = ++generation;
+      clearTimeout(pendingCheck);
+      setIsAdmin(false);
+      setIsOpen(false);
+      // Supabase auth callbacks run under the auth lock. Defer the profile
+      // request until the callback has returned, and reject stale responses.
+      if (userId) {
+        pendingCheck = setTimeout(() => {
+          void checkAdminRole(userId, requestGeneration);
+        }, 0);
       }
     };
 
-    void registerServiceWorker();
-  }, [addLog, subscribeUser]);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        scheduleAdminCheck(session?.user?.id ?? null);
+      }
+    );
+    const initialGeneration = generation;
+    void supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!disposed && generation === initialGeneration) {
+        scheduleAdminCheck(user?.id ?? null);
+      }
+    }).catch((error) => {
+      console.error('Error checking admin role:', error);
+    });
+
+    return () => {
+      disposed = true;
+      generation += 1;
+      clearTimeout(pendingCheck);
+      subscription.unsubscribe();
+    };
+  }, []);
 
   const requestPermission = async () => {
     if (!('Notification' in window)) {

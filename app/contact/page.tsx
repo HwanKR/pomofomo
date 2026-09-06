@@ -1,5 +1,6 @@
 'use client';
 
+import { signOutWithPushCleanup } from '@/lib/pushSubscriptionLifecycle';
 import Link from 'next/link';
 import { ArrowLeft, Mail, Copy } from 'lucide-react';
 import Navbar from '@/components/Navbar';
@@ -60,7 +61,7 @@ export default function ContactPage() {
         toggleDarkMode={toggleDarkMode}
         onOpenSettings={() => setIsSettingsModalOpen(true)}
         onOpenLogin={() => setIsLoginModalOpen(true)}
-        onLogout={() => supabase.auth.signOut()}
+        onLogout={() => signOutWithPushCleanup()}
       />
       
       <div className="container max-w-lg mx-auto py-6 px-4 pb-24 mt-4 animate-fade-in">

@@ -1,5 +1,6 @@
 'use client';
 
+import { signOutWithPushCleanup } from '@/lib/pushSubscriptionLifecycle';
 import { useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useAuthSession } from '@/hooks/useAuthSession';
@@ -82,7 +83,7 @@ export default function Home() {
         onOpenSettings={() => setIsSettingsModalOpen(true)}
 
         onOpenLogin={() => setIsLoginModalOpen(true)}
-        onLogout={() => supabase.auth.signOut()}
+        onLogout={() => signOutWithPushCleanup()}
       />
 
       {/* Content Container - Narrow for Focus */}
