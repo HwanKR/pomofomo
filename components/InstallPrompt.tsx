@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Download, Share, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -66,7 +66,20 @@ function getInstallContext(): InstallContext {
   };
 }
 
+const subscribeToHydration = () => () => {};
+
 export default function InstallPrompt() {
+  const isHydrated = useSyncExternalStore(
+    subscribeToHydration,
+    () => true,
+    () => false
+  );
+
+  // Browser-only context is read after server/client hydration agrees on null.
+  return isHydrated ? <BrowserInstallPrompt /> : null;
+}
+
+function BrowserInstallPrompt() {
   const [installContext] = useState<InstallContext>(getInstallContext);
   const [isIOSPromptVisible, setIsIOSPromptVisible] = useState(
     installContext.isIOS
