@@ -1,5 +1,6 @@
 'use client';
 
+import { signOutWithPushCleanup } from '@/lib/pushSubscriptionLifecycle';
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 // import { User } from '@supabase/supabase-js'; // Removed unused
@@ -94,7 +95,7 @@ export default function ProfilePage() {
         toggleDarkMode={toggleDarkMode}
         onOpenSettings={() => setIsSettingsModalOpen(true)}
         onOpenLogin={() => setIsLoginModalOpen(true)}
-        onLogout={() => supabase.auth.signOut()}
+        onLogout={() => signOutWithPushCleanup()}
       />
 
       <div className="max-w-4xl mx-auto px-4 py-8 space-y-8 animate-fade-in mt-16">

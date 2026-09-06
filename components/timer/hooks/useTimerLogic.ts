@@ -18,6 +18,9 @@ export const useTimerLogic = ({
 }: UseTimerLogicProps) => {
   const [timerMode, setTimerMode] = useState<TimerMode>('focus');
   const [timeLeft, setTimeLeft] = useState(settings.pomoTime * 60);
+  // The active session may have been started on a device with different
+  // settings. Its elapsed time must use its own original duration.
+  const [timerDuration, setTimerDuration] = useState(settings.pomoTime * 60);
   const [isRunning, setIsRunning] = useState(false);
   const [cycleCount, setCycleCount] = useState(0);
   const [focusLoggedSeconds, setFocusLoggedSeconds] = useState(0);
@@ -50,9 +53,11 @@ export const useTimerLogic = ({
     if (
       !isRunning &&
       focusLoggedSeconds === 0 &&
+      timerDuration === prevDurations[timerMode] &&
       timeLeft === prevDurations[timerMode]
     ) {
       setTimeLeft(configuredDurations[timerMode]);
+      setTimerDuration(configuredDurations[timerMode]);
     }
   }
 
@@ -101,17 +106,20 @@ export const useTimerLogic = ({
   // first interval tick see diff <= 0 and complete the timer instantly.
   // Callers firing from stale closures (e.g. delayed auto-start) pass the
   // intended mode/remaining explicitly instead of relying on current state.
-  const startTimer = useCallback((options?: { mode?: TimerMode; remainingSeconds?: number }) => {
+  const startTimer = useCallback((options?: { mode?: TimerMode; remainingSeconds?: number; durationSeconds?: number }) => {
     const mode = options?.mode ?? timerMode;
-    const duration = mode === 'focus'
-      ? settings.pomoTime * 60
-      : mode === 'shortBreak'
-        ? settings.shortBreak * 60
-        : settings.longBreak * 60;
+    const duration = options?.durationSeconds ?? (options?.mode === undefined
+      ? timerDuration
+      : mode === 'focus'
+        ? settings.pomoTime * 60
+        : mode === 'shortBreak'
+          ? settings.shortBreak * 60
+          : settings.longBreak * 60);
     const remaining = options?.remainingSeconds ?? timeLeft;
 
     endTimeRef.current = Date.now() + (remaining * 1000);
     if (options?.mode !== undefined) setTimerMode(options.mode);
+    setTimerDuration(duration);
     if (options?.remainingSeconds !== undefined) setTimeLeft(options.remainingSeconds);
     setIsRunning(true);
 
@@ -129,24 +137,19 @@ export const useTimerLogic = ({
     // Break modes should use 'online' to avoid sending "study started" notification
     const statusForMode = mode === 'focus' ? 'studying' : 'online';
     updateStatus(statusForMode, undefined, new Date(logicalStart).toISOString(), undefined, 'timer', mode, duration);
-  }, [timerMode, timeLeft, settings, updateStatus]);
+  }, [timerMode, timeLeft, timerDuration, settings, updateStatus]);
 
   const toggleTimer = useCallback((forceStart = false) => {
     playClickSound();
 
     if (!forceStart && isRunning) {
       // Pause
-      const duration = timerMode === 'focus'
-        ? settings.pomoTime * 60
-        : timerMode === 'shortBreak'
-          ? settings.shortBreak * 60
-          : settings.longBreak * 60;
       setIsRunning(false);
-      updateStatus('paused', undefined, undefined, duration - timeLeft, 'timer', timerMode, duration);
+      updateStatus('paused', undefined, undefined, timerDuration - timeLeft, 'timer', timerMode, timerDuration);
     } else {
       startTimer();
     }
-  }, [isRunning, timeLeft, timerMode, settings, playClickSound, updateStatus, startTimer]);
+  }, [isRunning, timeLeft, timerMode, timerDuration, playClickSound, updateStatus, startTimer]);
 
   const resetTimerManual = useCallback(() => {
     setIsRunning(false);
@@ -156,7 +159,9 @@ export const useTimerLogic = ({
     else resetTime = settings.longBreak * 60;
 
     setTimeLeft(resetTime);
+    setTimerDuration(resetTime);
     if (timerMode === 'focus') setFocusLoggedSeconds(0);
+    return resetTime;
   }, [timerMode, settings]);
 
   const changeTimerMode = useCallback((mode: TimerMode) => {
@@ -169,17 +174,21 @@ export const useTimerLogic = ({
     else newTime = settings.longBreak * 60;
 
     setTimeLeft(newTime);
+    setTimerDuration(newTime);
     if (mode === 'focus') setFocusLoggedSeconds(0);
+    return newTime;
   }, [isRunning, settings]);
 
   return {
     timerMode,
     timeLeft,
+    timerDuration,
     isRunning,
     cycleCount,
     focusLoggedSeconds,
     setTimerMode,
     setTimeLeft,
+    setTimerDuration,
     setIsRunning,
     setCycleCount,
     setFocusLoggedSeconds,

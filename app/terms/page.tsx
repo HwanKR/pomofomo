@@ -1,5 +1,6 @@
 'use client';
 
+import { signOutWithPushCleanup } from '@/lib/pushSubscriptionLifecycle';
 import { useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import Navbar from '@/components/Navbar';
@@ -31,7 +32,7 @@ export default function TermsPage() {
         theme={theme}
         isDarkMode={isDarkMode}
         toggleDarkMode={toggleDarkMode}
-        onLogout={() => supabase.auth.signOut()}
+        onLogout={() => signOutWithPushCleanup()}
         onOpenLogin={() => supabase.auth.signInWithOAuth({ provider: 'google' })}
       />
 

@@ -52,6 +52,7 @@ type SavedInterval = {
 
 type SavedTimerState = {
   mode: TimerMode;
+  duration?: number;
   isRunning: boolean;
   timeLeft: number;
   targetTime: number | null;
@@ -201,11 +202,13 @@ export default function TimerApp({
   const {
     timerMode,
     timeLeft,
+    timerDuration,
     isRunning,
     cycleCount,
     focusLoggedSeconds,
     setTimerMode,
     setTimeLeft,
+    setTimerDuration,
     setIsRunning,
     setCycleCount,
     setFocusLoggedSeconds,
@@ -241,6 +244,10 @@ export default function TimerApp({
   // (once per mount per account).
   const storageOwner = isLoggedIn ? getStorageOwner() : GUEST_OWNER;
   const hasSyncedRef = useRef(false);
+  // Version session transitions so a delayed save can only reset the state
+  // that created its record. Comparing displayed values would miss a
+  // restart/pause or reset cycle that happens to return to the same values.
+  const sessionRevisionRef = useRef(0);
   // Guards the task-persistence effect below: stays false until a real
   // (restored or user-made) task selection has been seen for this owner.
   const taskStateDirtyRef = useRef(false);
@@ -256,6 +263,7 @@ export default function TimerApp({
     setTimerMode('focus');
     setIsRunning(false);
     setTimeLeft(settings.pomoTime * 60);
+    setTimerDuration(settings.pomoTime * 60);
     setCycleCount(0);
     setFocusLoggedSeconds(0);
     setIsStopwatchRunning(false);
@@ -284,8 +292,10 @@ export default function TimerApp({
     sElapsed: number,
     sStart: number | null,
     currentIntervals: { start: number; end: number }[],
-    currentStart: number | null // NEW PARAMETER
+    currentStart: number | null,
+    duration: number
   ) => {
+    sessionRevisionRef.current += 1;
     // Stamp from the store, not the React `settings` closure: the preset
     // handler writes the store synchronously right before saving (the closure
     // still holds the pre-preset durations), and the expired-timer settle
@@ -297,6 +307,7 @@ export default function TimerApp({
       activeTab: currentTab,
       timer: {
         mode: tMode,
+        duration,
         isRunning: tRunning,
         timeLeft: tLeft,
         targetTime: tTarget,
@@ -410,9 +421,9 @@ export default function TimerApp({
     // stomp an already-active session.
     if (isRunning || isStopwatchRunning || stopwatchTime > 0) return;
 
-    startTimer({ mode, remainingSeconds: seconds });
+    startTimer({ mode, remainingSeconds: seconds, durationSeconds: seconds });
     currentIntervalStartRef.current = Date.now();
-    saveState(tab, mode, true, seconds, endTimeRef.current, cycleCount, focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, intervals, currentIntervalStartRef.current);
+    saveState(tab, mode, true, seconds, endTimeRef.current, cycleCount, focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, intervals, currentIntervalStartRef.current, seconds);
   }, [isRunning, isStopwatchRunning, stopwatchTime, startTimer, saveState, tab, cycleCount, focusLoggedSeconds, intervals, currentIntervalStartRef, endTimeRef]);
 
   const autoStartTimerRef = useRef(autoStartTimer);
@@ -427,8 +438,7 @@ export default function TimerApp({
     const { nextMode, nextSeconds, nextCycle } = computeNextTimerPhase(timerMode, cycleCount, settings);
 
     if (timerMode === 'focus') {
-      const duration = settings.pomoTime * 60;
-      const remaining = duration - focusLoggedSeconds;
+      const remaining = timerDuration - focusLoggedSeconds;
 
       if (remaining > 0) {
         // Pass endTimeRef.current as forcedEndTime to ensure exact recording time
@@ -460,7 +470,8 @@ export default function TimerApp({
     // record itself is already durable: triggerSave parked it synchronously.)
     setTimerMode(nextMode);
     setTimeLeft(nextSeconds);
-    saveState(tab, nextMode, false, nextSeconds, null, nextCycle, 0, isStopwatchRunning, stopwatchTime, null, [], null);
+    setTimerDuration(nextSeconds);
+    saveState(tab, nextMode, false, nextSeconds, null, nextCycle, 0, isStopwatchRunning, stopwatchTime, null, [], null, nextSeconds);
 
     // ✨ Push Notification Trigger
     if ('serviceWorker' in navigator && Notification.permission === 'granted') {
@@ -487,7 +498,7 @@ export default function TimerApp({
     // interval state; this covers the guest path, where no record is created.
     setIntervals([]);
     currentIntervalStartRef.current = null;
-  }, [timerMode, settings, focusLoggedSeconds, cycleCount, triggerSave, playAlarm, setFocusLoggedSeconds, setCycleCount, setTimerMode, setTimeLeft, setIntervals, endTimeRef, saveState, tab, isStopwatchRunning, stopwatchTime, currentIntervalStartRef]);
+  }, [timerMode, timerDuration, settings, focusLoggedSeconds, cycleCount, triggerSave, playAlarm, setFocusLoggedSeconds, setCycleCount, setTimerMode, setTimeLeft, setTimerDuration, setIntervals, endTimeRef, saveState, tab, isStopwatchRunning, stopwatchTime, currentIntervalStartRef]);
 
   // Update the ref handler whenever `handleTimerComplete` changes
   useEffect(() => {
@@ -510,19 +521,18 @@ export default function TimerApp({
         setIntervals(newIntervals);
         currentIntervalStartRef.current = null;
       }
-      saveState(tab, timerMode, false, timeLeft, null, cycleCount, focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, newIntervals, null);
+      saveState(tab, timerMode, false, timeLeft, null, cycleCount, focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, newIntervals, null, timerDuration);
     } else {
       // Starting
       const target = Date.now() + (timeLeft * 1000);
       currentIntervalStartRef.current = Date.now();
-      saveState(tab, timerMode, true, timeLeft, target, cycleCount, focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, intervals, currentIntervalStartRef.current);
+      saveState(tab, timerMode, true, timeLeft, target, cycleCount, focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, intervals, currentIntervalStartRef.current, timerDuration);
     }
     toggleTimer();
   };
 
   const handleToggleStopwatch = () => {
-    const fullTime = timerMode === 'focus' ? settings.pomoTime * 60 : timerMode === 'shortBreak' ? settings.shortBreak * 60 : settings.longBreak * 60;
-    const hasTimerProgress = !isRunning && timeLeft < fullTime && timeLeft > 0;
+    const hasTimerProgress = !isRunning && timeLeft < timerDuration && timeLeft > 0;
 
     if (isRunning || (timerMode === 'focus' && focusLoggedSeconds > 0) || hasTimerProgress) {
       toast.error('타이머 기록이 있습니다.\n먼저 타이머를 초기화하거나 저장해주세요.');
@@ -537,20 +547,19 @@ export default function TimerApp({
         setIntervals(newIntervals);
         currentIntervalStartRef.current = null;
       }
-      saveState(tab, timerMode, isRunning, timeLeft, null, cycleCount, focusLoggedSeconds, false, stopwatchTime, null, newIntervals, null);
+      saveState(tab, timerMode, isRunning, timeLeft, null, cycleCount, focusLoggedSeconds, false, stopwatchTime, null, newIntervals, null, timerDuration);
     } else {
       // Starting
       const start = Date.now() - (stopwatchTime * 1000);
       currentIntervalStartRef.current = Date.now();
-      saveState(tab, timerMode, isRunning, timeLeft, null, cycleCount, focusLoggedSeconds, true, stopwatchTime, start, intervals, currentIntervalStartRef.current);
+      saveState(tab, timerMode, isRunning, timeLeft, null, cycleCount, focusLoggedSeconds, true, stopwatchTime, start, intervals, currentIntervalStartRef.current, timerDuration);
     }
     toggleStopwatch();
   };
 
   const handleChangeTimerMode = (mode: TimerMode) => {
     if (timerMode === 'focus' && isLoggedIn) {
-      const fullTime = settings.pomoTime * 60;
-      const elapsed = fullTime - timeLeft;
+      const elapsed = timerDuration - timeLeft;
       const additional = elapsed - focusLoggedSeconds;
       // Save unsaved focus time before the switch discards it — but only
       // with actual session evidence: `elapsed` derived from settings alone
@@ -563,9 +572,10 @@ export default function TimerApp({
       }
     }
 
-    changeTimerMode(mode);
+    // Persist the duration applied by the hook, not this render's old timeLeft.
+    const nextTimeLeft = changeTimerMode(mode);
     setIntervals([]);
-    saveState(tab, mode, false, timeLeft, null, cycleCount, mode === 'focus' ? 0 : focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, [], null);
+    saveState(tab, mode, false, nextTimeLeft, null, cycleCount, mode === 'focus' ? 0 : focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, [], null, nextTimeLeft);
   };
 
   const handlePresetClick = (minutes: number) => {
@@ -579,23 +589,41 @@ export default function TimerApp({
     }
     setTimerMode("focus");
     setTimeLeft(minutes * 60);
+    setTimerDuration(minutes * 60);
     setFocusLoggedSeconds(0);
     setSettings((prev: Settings) => ({ ...prev, pomoTime: minutes }));
     setIntervals([]);
-    saveState(tab, "focus", false, minutes * 60, null, cycleCount, 0, isStopwatchRunning, stopwatchTime, null, [], null);
+    saveState(tab, "focus", false, minutes * 60, null, cycleCount, 0, isStopwatchRunning, stopwatchTime, null, [], null, minutes * 60);
     toast.success(`${minutes === 0.1 ? '5초' : minutes + '분'}으로 설정됨`);
   };
 
   const handleSaveTimer = () => {
-    const fullTime = timerMode === 'focus' ? settings.pomoTime * 60 : timerMode === 'shortBreak' ? settings.shortBreak * 60 : settings.longBreak * 60;
-    const elapsed = fullTime - timeLeft;
+    const configuredFullTime = timerMode === 'focus' ? settings.pomoTime * 60 : timerMode === 'shortBreak' ? settings.shortBreak * 60 : settings.longBreak * 60;
+    const elapsed = timerDuration - timeLeft;
     const additional = elapsed - focusLoggedSeconds;
 
     if (additional > 0) {
+      let savedRevision: number | null = null;
       const afterSave = () => {
-        resetTimerManual();
+        // This callback also runs after retries, terminal rejections and task
+        // popup answers. The record can finish saving without owning the
+        // timer anymore; leave newer progress and its persisted state alone.
+        if (
+          savedRevision !== sessionRevisionRef.current ||
+          getStorageOwner() !== storageOwner
+        ) return;
+        const currentSettings = readSettingsSnapshot();
+        const currentFullTime = (timerMode === 'focus'
+          ? currentSettings.pomoTime
+          : timerMode === 'shortBreak'
+            ? currentSettings.shortBreak
+            : currentSettings.longBreak) * 60;
+        // Settings can change without a session snapshot being written.
+        if (currentFullTime !== configuredFullTime) return;
+
+        const resetTime = resetTimerManual();
         setIntervals([]);
-        saveState(tab, timerMode, false, fullTime, null, cycleCount, 0, isStopwatchRunning, stopwatchTime, null, [], null);
+        saveState(tab, timerMode, false, resetTime, null, cycleCount, 0, isStopwatchRunning, stopwatchTime, null, [], null, resetTime);
         updateStatus('online', undefined, undefined, 0, 'timer', timerMode, 0);
       };
       triggerSave('pomo', additional, afterSave, Date.now(), () => {
@@ -604,7 +632,8 @@ export default function TimerApp({
         // cannot re-offer time whose durable copy is the parked draft.
         const newLogged = focusLoggedSeconds + additional;
         setFocusLoggedSeconds(newLogged);
-        saveState(tab, timerMode, false, timeLeft, null, cycleCount, newLogged, isStopwatchRunning, stopwatchTime, null, [], null);
+        saveState(tab, timerMode, false, timeLeft, null, cycleCount, newLogged, isStopwatchRunning, stopwatchTime, null, [], null, timerDuration);
+        savedRevision = sessionRevisionRef.current;
       });
     }
   };
@@ -620,7 +649,7 @@ export default function TimerApp({
       // eagerly and persist the consumed snapshot, so neither a re-click nor
       // a refresh can save the same time again.
       setStopwatchTime(0);
-      saveState(tab, timerMode, isRunning, timeLeft, null, cycleCount, focusLoggedSeconds, false, 0, null, [], null);
+      saveState(tab, timerMode, isRunning, timeLeft, null, cycleCount, focusLoggedSeconds, false, 0, null, [], null, timerDuration);
       updateStatus('online', undefined, undefined, 0);
     });
   };
@@ -629,7 +658,7 @@ export default function TimerApp({
     resetStopwatch();
     setIntervals([]);
     currentIntervalStartRef.current = null;
-    saveState(tab, timerMode, isRunning, timeLeft, null, cycleCount, focusLoggedSeconds, false, 0, null, [], null);
+    saveState(tab, timerMode, isRunning, timeLeft, null, cycleCount, focusLoggedSeconds, false, 0, null, [], null, timerDuration);
     // Clear server state
     updateStatus('online', undefined, undefined, 0);
   };
@@ -722,6 +751,11 @@ export default function TimerApp({
     stopwatchStartTimeRef.current = 0;
     currentIntervalStartRef.current = null;
     taskStateDirtyRef.current = false;
+    return () => {
+      // Invalidate callbacks on unmount and account changes, including an
+      // eventual return to the original account before a save resolves.
+      sessionRevisionRef.current += 1;
+    };
   }, [storageOwner, endTimeRef, stopwatchStartTimeRef, currentIntervalStartRef]);
 
   // Completion transition for a timer whose deadline passed while the tab was
@@ -763,7 +797,7 @@ export default function TimerApp({
           (currentStart ? targetTime - currentStart : 0)) / 1000
       );
       const remaining = Math.min(
-        currentSettings.pomoTime * 60 - (state.timer.loggedSeconds || 0),
+        (state.timer.duration ?? state.configuredDurations?.focus ?? currentSettings.pomoTime * 60) - (state.timer.loggedSeconds || 0),
         evidenceSeconds
       );
 
@@ -803,6 +837,7 @@ export default function TimerApp({
     setCycleCount(nextCycle);
     setTimerMode(nextMode);
     setTimeLeft(nextSeconds);
+    setTimerDuration(nextSeconds);
     setFocusLoggedSeconds(0);
     setIsRunning(false);
     // Persist the settled transition. The stopwatch slice is carried over
@@ -812,7 +847,7 @@ export default function TimerApp({
     saveState(
       state.activeTab, nextMode, false, nextSeconds, null, nextCycle, 0,
       stopwatchRunning, state.stopwatch?.elapsed ?? 0, state.stopwatch?.startTime ?? null,
-      [], null
+      [], null, nextSeconds
     );
 
     if (state.timer.mode === 'focus') {
@@ -868,6 +903,16 @@ export default function TimerApp({
               setTimerMode(state.timer.mode);
               setCycleCount(state.timer.cycleCount);
               setFocusLoggedSeconds(state.timer.loggedSeconds || 0);
+              const restoredSettings = readSettingsSnapshot();
+              const configuredFull =
+                state.timer.mode === 'focus'
+                  ? restoredSettings.pomoTime * 60
+                  : state.timer.mode === 'shortBreak'
+                    ? restoredSettings.shortBreak * 60
+                    : restoredSettings.longBreak * 60;
+              setTimerDuration(
+                state.timer.duration ?? state.configuredDurations?.[state.timer.mode] ?? configuredFull
+              );
 
               if (state.timer.isRunning && state.timer.targetTime) {
                 setTimeLeft(Math.ceil((state.timer.targetTime - now) / 1000));
@@ -885,16 +930,10 @@ export default function TimerApp({
                 // studied). Anything else — partial progress, banked
                 // seconds, unstamped legacy snapshots — restores verbatim.
                 const stampedFull = state.configuredDurations?.[state.timer.mode];
-                const restoredSettings = readSettingsSnapshot();
-                const configuredFull =
-                  state.timer.mode === 'focus'
-                    ? restoredSettings.pomoTime * 60
-                    : state.timer.mode === 'shortBreak'
-                      ? restoredSettings.shortBreak * 60
-                      : restoredSettings.longBreak * 60;
                 const idleAtStampedFull =
                   stampedFull !== undefined &&
                   state.timer.timeLeft === stampedFull &&
+                  (state.timer.duration === undefined || state.timer.duration === stampedFull) &&
                   !(state.timer.loggedSeconds > 0);
                 // A non-positive (or non-numeric) idle timeLeft is never
                 // real progress — it is a finished-but-unsettled or corrupt
@@ -903,6 +942,9 @@ export default function TimerApp({
                 // positive duration). Restoring it verbatim would show 00:00
                 // and offer a save button for fullTime seconds never studied.
                 const brokenIdle = !(state.timer.timeLeft > 0);
+                if (idleAtStampedFull || brokenIdle) {
+                  setTimerDuration(configuredFull);
+                }
                 if (brokenIdle) {
                   // The banked seconds' durable copy is the saved record or
                   // parked draft; keeping them against a fresh full timer
@@ -970,7 +1012,7 @@ export default function TimerApp({
       }
     };
     restoreState();
-  }, [setTimerMode, setCycleCount, setFocusLoggedSeconds, setTimeLeft, setIsRunning, endTimeRef, setIsStopwatchRunning, setStopwatchTime, stopwatchStartTimeRef, setIntervals, setSelectedTaskId, setSelectedTask, isLoggedIn, currentIntervalStartRef, storageOwner]);
+  }, [setTimerMode, setCycleCount, setFocusLoggedSeconds, setTimeLeft, setTimerDuration, setIsRunning, endTimeRef, setIsStopwatchRunning, setStopwatchTime, stopwatchStartTimeRef, setIntervals, setSelectedTaskId, setSelectedTask, isLoggedIn, currentIntervalStartRef, storageOwner]);
 
   useEffect(() => {
     if (!isLoggedIn) return;
@@ -985,129 +1027,114 @@ export default function TimerApp({
 
     const syncServerState = async () => {
       try {
-        // 로컬에서 이미 실행 중으로 복원된 경우 확인 (로컬 스토리지에서)
-        const parsed = readOwnedJson<SavedAppState>(FULL_STATE_KEY, storageOwner);
-        let localIsRunning = false;
-        let localIsStopwatchRunning = false;
-        let localElapsed = 0;
-        let localTimerElapsed = 0;
+        const saved = readOwnedJson<SavedAppState>(FULL_STATE_KEY, storageOwner);
+        const local = saved && Date.now() - saved.lastUpdated < 24 * 60 * 60 * 1000
+          ? saved
+          : null;
+        if (local?.timer.isRunning || local?.stopwatch.isRunning) return;
 
-        if (parsed) {
-          try {
-            localIsRunning = parsed.timer?.isRunning || false;
-            localIsStopwatchRunning = parsed.stopwatch?.isRunning || false;
-            localElapsed = parsed.stopwatch?.elapsed || 0;
+        const revision = sessionRevisionRef.current;
+        const data = await checkActiveSession();
+        if (
+          cancelled ||
+          revision !== sessionRevisionRef.current ||
+          getStorageOwner() !== storageOwner ||
+          !data
+        ) return;
 
-            // 로컬에서 실행 중이었다면 startTime 기반으로 실제 경과 시간 계산
-            if (localIsStopwatchRunning && parsed.stopwatch?.startTime) {
-              const now = Date.now();
-              localElapsed = Math.floor((now - parsed.stopwatch.startTime) / 1000);
-            }
+        const now = Date.now();
+        const remoteUpdated = data.last_active_at ? new Date(data.last_active_at).getTime() : NaN;
+        // A local save/reset is stronger evidence than an older profile. In
+        // particular, loggedSeconds may already belong to a saved/outbox
+        // record and must not be turned back into unsaved study time.
+        if (local && (!Number.isFinite(remoteUpdated) || remoteUpdated <= local.lastUpdated)) return;
 
-            // For timer, calculate elapsed from timeLeft and duration
-            if (parsed.timer?.mode && parsed.timer?.timeLeft !== undefined) {
-              const localMode = parsed.timer.mode;
-              const localTimeLeft = parsed.timer.timeLeft;
-              const localDuration = localMode === 'focus'
-                ? settings.pomoTime * 60
-                : localMode === 'shortBreak'
-                  ? settings.shortBreak * 60
-                  : settings.longBreak * 60;
-              localTimerElapsed = localDuration - localTimeLeft;
+        if (data.timer_type === 'timer') {
+          if (local && local.stopwatch.elapsed > 0) return;
+          const mode = normalizeTimerMode(data.timer_mode);
+          const currentSettings = readSettingsSnapshot();
+          const configuredDuration = (mode === 'focus'
+            ? currentSettings.pomoTime
+            : mode === 'shortBreak' ? currentSettings.shortBreak : currentSettings.longBreak) * 60;
+          const duration = data.timer_duration || configuredDuration;
+          if (!Number.isFinite(duration) || duration <= 0 || duration >= 24 * 60 * 60) return;
 
-              // 타이머가 실행 중이었다면 targetTime 기반으로 실제 남은 시간 계산
-              if (localIsRunning && parsed.timer?.targetTime) {
-                const now = Date.now();
-                const actualRemaining = Math.max(0, Math.floor((parsed.timer.targetTime - now) / 1000));
-                localTimerElapsed = localDuration - actualRemaining;
-              }
-            }
-          } catch (e) {
-            console.error('Error parsing local state for sync', e);
-          }
-        }
+          // Presence can be offline after the source tab closes, and breaks
+          // use online. A pause clears study_start_time; presence alone does
+          // not tell us whether the clock is still running.
+          const startTime = data.study_start_time ? new Date(data.study_start_time).getTime() : NaN;
+          const running = Number.isFinite(startTime);
+          const elapsed = running
+            ? Math.floor((now - startTime) / 1000)
+            : data.total_stopwatch_time || 0;
+          if (!Number.isFinite(elapsed) || elapsed < 0 || (!running && elapsed === 0)) return;
+          const remaining = duration - elapsed;
+          if (remaining <= 0) return;
 
-        // 로컬에서 이미 실행 중으로 복원된 경우, 서버 동기화 스킵
-        if (localIsRunning || localIsStopwatchRunning) {
-          console.log('[Sync] 로컬에서 실행 중인 세션이 복원됨. 서버 동기화 스킵.');
+          const localDuration = local?.timer.duration
+            ?? (local ? local.configuredDurations?.[local.timer.mode] : undefined)
+            ?? configuredDuration;
+          const samePhase = local?.timer.mode === mode && localDuration === duration;
+          const localElapsed = local ? Math.max(0, localDuration - local.timer.timeLeft) : 0;
+          const localLogged = local?.timer.loggedSeconds || 0;
+          // Without a shared server session id we cannot merge unrelated
+          // phases safely. Keep unfinished local work instead of discarding
+          // it, and only carry consumed seconds into the same phase.
+          if (samePhase && localElapsed > elapsed) return;
+          if (!samePhase && localElapsed > localLogged) return;
+          const logged = mode === 'focus' && samePhase
+            ? Math.min(localLogged, elapsed)
+            : 0;
+          const unsaved = elapsed - logged;
+          const endedAt = running || !Number.isFinite(remoteUpdated)
+            ? now
+            : Math.min(now, remoteUpdated);
+          // Profiles carry elapsed totals, not the source device's pause
+          // intervals. Preserve that known total as a closed interval, then
+          // track subsequent work separately so local pause gaps stay out.
+          const importedIntervals = mode === 'focus' && unsaved > 0
+            ? [{ start: endedAt - unsaved * 1000, end: endedAt }]
+            : [];
+          const currentStart = running ? now : null;
+          const targetTime = running ? now + remaining * 1000 : null;
+          const cycle = local?.timer.cycleCount || 0;
+
+          setTab('timer');
+          setTimerMode(mode);
+          setTimerDuration(duration);
+          setTimeLeft(remaining);
+          setIsRunning(running);
+          setCycleCount(cycle);
+          setFocusLoggedSeconds(logged);
+          setIntervals(importedIntervals);
+          currentIntervalStartRef.current = currentStart;
+          endTimeRef.current = targetTime ?? 0;
+          setIsStopwatchRunning(false);
+          setStopwatchTime(0);
+          saveState('timer', mode, running, remaining, targetTime, cycle, logged,
+            false, 0, null, importedIntervals, currentStart, duration);
+          if (running) toast.success('다른 기기에서 진행 중인 타이머를 불러왔습니다.', { icon: '🔄' });
           return;
         }
 
-        const data = await checkActiveSession();
-        if (cancelled) return;
-        if (data?.status === 'studying' && data.study_start_time) {
+        // Stopwatch behavior is unchanged by the focus-session handoff.
+        if (data.status === 'studying' && data.study_start_time) {
           const startTime = new Date(data.study_start_time).getTime();
-          const now = Date.now();
           const elapsed = Math.floor((now - startTime) / 1000);
-
           if (elapsed >= 0) {
-            // Found active session on server!
-            if (data.timer_type === 'timer') {
-              // Sync Pomodoro Timer
-              const mode = normalizeTimerMode(data.timer_mode);
-              const duration = data.timer_duration || (mode === 'focus' ? settings.pomoTime * 60 : mode === 'shortBreak' ? settings.shortBreak * 60 : settings.longBreak * 60);
-
-              const remaining = duration - elapsed;
-              if (remaining > 0) {
-                setTab('timer');
-                setTimerMode(mode);
-                setTimeLeft(remaining);
-                setIsRunning(true);
-                endTimeRef.current = now + (remaining * 1000);
-
-                if (mode === 'focus' && elapsed === 0) setFocusLoggedSeconds(0);
-                if (mode === 'focus') setFocusLoggedSeconds(elapsed);
-
-                toast.success('다른 기기에서 진행 중인 타이머를 불러왔습니다.', { icon: '🔄' });
-              }
-            } else {
-              // Sync Stopwatch (Default)
-              setTab('stopwatch');
-              setStopwatchTime(elapsed);
-              setIsStopwatchRunning(true);
-              stopwatchStartTimeRef.current = startTime;
-              currentIntervalStartRef.current = now;
-
-              toast.success('다른 기기에서 진행 중인 스톱워치를 불러왔습니다.', { icon: '🔄' });
-            }
+            sessionRevisionRef.current += 1;
+            setTab('stopwatch');
+            setStopwatchTime(elapsed);
+            setIsStopwatchRunning(true);
+            stopwatchStartTimeRef.current = startTime;
+            currentIntervalStartRef.current = now;
+            toast.success('다른 기기에서 진행 중인 스톱워치를 불러왔습니다.', { icon: '🔄' });
           }
-        } else if (data?.total_stopwatch_time && data.total_stopwatch_time > 0) {
-          // Found paused session - compare with local storage to prevent data loss
-
-          if (data.timer_type === 'timer') {
-            const mode = normalizeTimerMode(data.timer_mode);
-            const duration = data.timer_duration || 0;
-            const serverElapsed = data.total_stopwatch_time;
-
-            // Use the larger elapsed time to prevent data loss
-            const finalElapsed = Math.max(serverElapsed, localTimerElapsed);
-
-            if (localTimerElapsed > serverElapsed) {
-              console.log(`[Sync] 로컬 타이머 시간(${localTimerElapsed}s)이 DB(${serverElapsed}s)보다 큼. 로컬 값 유지.`);
-            } else {
-              const remaining = duration - finalElapsed;
-              if (remaining > 0) {
-                setTab('timer');
-                setTimerMode(mode);
-                setTimeLeft(remaining);
-                setIsRunning(false);
-                if (mode === 'focus') setFocusLoggedSeconds(finalElapsed);
-              }
-            }
-          } else {
-            // Use the larger time to prevent data loss
-            const serverTime = data.total_stopwatch_time;
-            const maxTime = Math.max(localElapsed, serverTime);
-
-            if (localElapsed > serverTime) {
-              console.log(`[Sync] 로컬 스톱워치 시간(${localElapsed}s)이 DB(${serverTime}s)보다 큼. 로컬 값 유지.`);
-            } else if (maxTime > 0) {
-              // 서버 시간이 더 클 때만 업데이트
-              setTab('stopwatch');
-              setStopwatchTime(maxTime);
-              setIsStopwatchRunning(false);
-            }
-          }
+        } else if (data.total_stopwatch_time && data.total_stopwatch_time >= (local?.stopwatch.elapsed || 0)) {
+          sessionRevisionRef.current += 1;
+          setTab('stopwatch');
+          setStopwatchTime(data.total_stopwatch_time);
+          setIsStopwatchRunning(false);
         }
       } catch (e) {
         console.error('Sync failed', e);
@@ -1119,7 +1146,7 @@ export default function TimerApp({
     return () => {
       cancelled = true;
     };
-  }, [isLoggedIn, checkActiveSession, setTab, setStopwatchTime, setIsStopwatchRunning, stopwatchStartTimeRef, currentIntervalStartRef, setIntervals, settings, endTimeRef, setFocusLoggedSeconds, setIsRunning, setTimeLeft, setTimerMode, storageOwner]);
+  }, [isLoggedIn, checkActiveSession, setTab, setStopwatchTime, setIsStopwatchRunning, stopwatchStartTimeRef, currentIntervalStartRef, setIntervals, endTimeRef, setFocusLoggedSeconds, setIsRunning, setTimeLeft, setTimerDuration, setCycleCount, setTimerMode, storageOwner, saveState]);
 
 
 
@@ -1231,13 +1258,13 @@ export default function TimerApp({
             {tab === 'timer' ? (
               <TimerDisplay
                 timerMode={timerMode} timeLeft={timeLeft} isRunning={isRunning} isSaving={isSaving} cycleCount={displayCycleCount} longBreakInterval={settings.longBreakInterval} presets={settings.presets}
-                showSaveButton={timerMode === 'focus' && !isRunning && (timerMode === 'focus' ? (settings.pomoTime * 60) : (timerMode === 'shortBreak' ? settings.shortBreak * 60 : settings.longBreak * 60)) - timeLeft - focusLoggedSeconds > 0}
-                showResetButton={!isRunning && timeLeft !== (timerMode === 'focus' ? (settings.pomoTime * 60) : (timerMode === 'shortBreak' ? settings.shortBreak * 60 : settings.longBreak * 60))}
+                showSaveButton={timerMode === 'focus' && !isRunning && timerDuration - timeLeft - focusLoggedSeconds > 0}
+                showResetButton={!isRunning && timeLeft !== timerDuration}
                 onToggleTimer={handleToggleTimer}
                 onResetTimer={() => {
-                  resetTimerManual();
+                  const resetTime = resetTimerManual();
                   setIntervals([]);
-                  saveState(tab, timerMode, false, timerMode === 'focus' ? settings.pomoTime * 60 : (timerMode === 'shortBreak' ? settings.shortBreak * 60 : settings.longBreak * 60), null, cycleCount, timerMode === 'focus' ? 0 : focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, [], null);
+                  saveState(tab, timerMode, false, resetTime, null, cycleCount, timerMode === 'focus' ? 0 : focusLoggedSeconds, isStopwatchRunning, stopwatchTime, null, [], null, resetTime);
                   updateStatus('online', undefined, undefined, 0, 'timer', timerMode, 0);
                 }}
                 onSaveTimer={handleSaveTimer} onChangeMode={handleChangeTimerMode} onPresetClick={handlePresetClick}

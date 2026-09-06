@@ -11,6 +11,8 @@ type StorageObject = {
 };
 
 type MockClientOverrides = {
+  rowsByTable?: Record<string, Array<Record<string, unknown>>>;
+  deleteErrors?: Record<string, unknown>;
   ownedGroups?: OwnedGroup[];
   memberRows?: MemberRow[];
   profileUpdateError?: unknown;
@@ -42,6 +44,7 @@ function createMockClient(overrides: MockClientOverrides = {}) {
   let storageListCallCount = 0;
   let storageRemoveCallCount = 0;
   const state = {
+    rowsByTable: structuredClone(overrides.rowsByTable ?? {}),
     deleteEqCalls: [] as Array<{ table: string; column: string; value: unknown }>,
     deleteInCalls: [] as Array<{ table: string; column: string; values: unknown[] }>,
     profileUpdateCalls: [] as Array<{
@@ -112,6 +115,14 @@ function createMockClient(overrides: MockClientOverrides = {}) {
 
           if (mode === 'delete') {
             state.deleteEqCalls.push({ table, column, value });
+            if (overrides.deleteErrors?.[table]) {
+              return { error: overrides.deleteErrors[table] };
+            }
+            if (state.rowsByTable[table]) {
+              state.rowsByTable[table] = state.rowsByTable[table].filter(
+                (row) => row[column] !== value
+              );
+            }
             return { error: null };
           }
 
@@ -431,4 +442,78 @@ describe('account-reset route', () => {
     expect(state.profileUpdateCalls).toEqual([]);
     expect(state.deleteUserMock).not.toHaveBeenCalled();
   });
+
+  it('clears long-term tasks, subtasks, and daily tasks only for the authenticated user', async () => {
+    const otherUserRows = {
+      tasks: { id: 'other-daily', user_id: 'user-2', source_subtask_id: 'other-subtask' },
+      long_term_subtasks: { id: 'other-subtask', user_id: 'user-2', long_term_task_id: 'other-parent' },
+      long_term_tasks: { id: 'other-parent', user_id: 'user-2', archived_at: null },
+    };
+    const { client, state } = createMockClient({
+      rowsByTable: {
+        tasks: [
+          { id: 'daily-1', user_id: 'user-1', source_subtask_id: 'subtask-1' },
+          otherUserRows.tasks,
+        ],
+        long_term_subtasks: [
+          { id: 'subtask-1', user_id: 'user-1', long_term_task_id: 'parent-1', completed_at: null },
+          { id: 'subtask-2', user_id: 'user-1', long_term_task_id: 'parent-2', completed_at: '2026-09-01T00:00:00Z' },
+          otherUserRows.long_term_subtasks,
+        ],
+        long_term_tasks: [
+          { id: 'parent-1', user_id: 'user-1', archived_at: null },
+          { id: 'parent-2', user_id: 'user-1', archived_at: '2026-09-01T00:00:00Z' },
+          otherUserRows.long_term_tasks,
+        ],
+      },
+    });
+    const { POST } = await loadPostHandler(client);
+    const makeRequest = () => new NextRequest('http://localhost/api/account-reset', {
+      method: 'POST',
+      headers: { authorization: 'Bearer valid-token', 'content-type': 'application/json' },
+      // A caller-supplied id must never override the verified token's owner.
+      body: JSON.stringify({ user_id: 'user-2' }),
+    });
+
+    const response = await POST(makeRequest());
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ success: true });
+    for (const [table, otherUserRow] of Object.entries(otherUserRows)) {
+      expect(state.rowsByTable[table]).toEqual([otherUserRow]);
+    }
+    expect(state.deleteEqCalls.filter(call => call.table in otherUserRows)).toEqual([
+      { table: 'tasks', column: 'user_id', value: 'user-1' },
+      { table: 'long_term_subtasks', column: 'user_id', value: 'user-1' },
+      { table: 'long_term_tasks', column: 'user_id', value: 'user-1' },
+    ]);
+    expect(state.profileUpdateCalls[0]).toMatchObject({ column: 'id', value: 'user-1' });
+    expect(state.deleteUserMock).not.toHaveBeenCalled();
+
+    // An already-empty account can be reset again without touching its neighbor.
+    const repeatedResponse = await POST(makeRequest());
+    expect(repeatedResponse.status).toBe(200);
+    for (const [table, otherUserRow] of Object.entries(otherUserRows)) {
+      expect(state.rowsByTable[table]).toEqual([otherUserRow]);
+    }
+  });
+
+  it.each(['long_term_subtasks', 'long_term_tasks'])(
+    'returns 500 instead of reporting success when deleting %s fails',
+    async (table) => {
+      const { client, state } = createMockClient({
+        deleteErrors: { [table]: { message: 'delete failed' } },
+      });
+      const { POST } = await loadPostHandler(client);
+      const response = await POST(new NextRequest('http://localhost/api/account-reset', {
+        method: 'POST',
+        headers: { authorization: 'Bearer valid-token' },
+      }));
+
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toEqual({ error: 'Account reset failed' });
+      expect(state.deleteEqCalls.at(-1)).toEqual({ table, column: 'user_id', value: 'user-1' });
+      expect(state.profileUpdateCalls).toEqual([]);
+      expect(state.deleteUserMock).not.toHaveBeenCalled();
+    }
+  );
 });

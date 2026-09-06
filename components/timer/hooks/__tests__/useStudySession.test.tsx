@@ -109,9 +109,15 @@ describe('useStudySession study records', () => {
     window.localStorage.setItem(AUTH_TOKEN_KEY, JSON.stringify({ user: { id: 'user-1' } }));
 
     supabaseMock.auth.getUser.mockResolvedValue({ data: { user: { id: 'user-1' } } });
+    const profileUpdate = {
+      eq: vi.fn().mockReturnThis(),
+      in: vi.fn().mockReturnThis(),
+      is: vi.fn().mockReturnThis(),
+      then: (resolve: (result: { error: null }) => void) => resolve({ error: null }),
+    };
     supabaseMock.from.mockImplementation(() => ({
       // profiles: mount-time status update + privacy lookup
-      update: vi.fn(() => ({ eq: vi.fn().mockResolvedValue({ error: null }) })),
+      update: vi.fn(() => profileUpdate),
       select: vi.fn(() => ({
         eq: vi.fn(() => ({ single: vi.fn().mockResolvedValue({ data: null }) })),
       })),

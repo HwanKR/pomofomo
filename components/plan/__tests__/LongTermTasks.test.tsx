@@ -1,3 +1,5 @@
+import { StrictMode } from 'react';
+import type { DragEndEvent } from '@dnd-kit/core';
 import {
   act,
   cleanup,
@@ -9,7 +11,8 @@ import {
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { supabaseMock } = vi.hoisted(() => ({
+const { supabaseMock, dragHandlers } = vi.hoisted(() => ({
+  dragHandlers: [] as Array<(event: DragEndEvent) => void>,
   supabaseMock: {
     from: vi.fn(),
     channel: vi.fn(),
@@ -20,6 +23,17 @@ const { supabaseMock } = vi.hoisted(() => ({
 vi.mock('@/lib/supabase', () => ({
   supabase: supabaseMock,
 }));
+
+vi.mock('@dnd-kit/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@dnd-kit/core')>();
+  return {
+    ...actual,
+    DndContext: (props: React.ComponentProps<typeof actual.DndContext>) => {
+      if (props.onDragEnd) dragHandlers.push(props.onDragEnd);
+      return <actual.DndContext {...props} />;
+    },
+  };
+});
 
 import LongTermTasks, {
   computeReorderedSubtasks,
@@ -221,6 +235,7 @@ describe('LongTermTasks', () => {
     deferFetch = false;
     pendingFetchResolvers = [];
     channelMocks = [];
+    dragHandlers.length = 0;
 
     supabaseMock.channel.mockImplementation((topic: string) => {
       const channel = createChannelMock(topic);
@@ -850,6 +865,206 @@ describe('LongTermTasks', () => {
     await waitFor(() => {
       expect(screen.getAllByText('SQLD')).toHaveLength(1);
     });
+  });
+
+  it.each(['', 'user-2'])('drops an old insert and preserves the new form after switching to %s', async (nextOwner) => {
+    const { rerender } = renderTasks();
+    await screen.findByText('빅데이터분석기사');
+    const deferredInsert = createDeferred<{ data: TaskRow; error: null }>();
+    nextTaskInsert = () => deferredInsert.promise;
+    fireEvent.click(screen.getByRole('button', { name: /장기 과제 추가/i }));
+    fireEvent.change(screen.getByPlaceholderText('장기 과제를 입력하세요 (예: 빅데이터분석기사)'), { target: { value: '비공개 과제' } });
+    fireEvent.click(screen.getByRole('button', { name: '추가' }));
+
+    longTermTasks = [];
+    subtasks = [];
+    rerender(<LongTermTasks userId={nextOwner} />);
+    await screen.findByText('아직 장기 과제가 없어요.');
+    expect(screen.queryByDisplayValue('비공개 과제')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /장기 과제 추가/i }));
+    fireEvent.change(screen.getByPlaceholderText('장기 과제를 입력하세요 (예: 빅데이터분석기사)'), { target: { value: '새 초안' } });
+    await act(async () => deferredInsert.resolve({ data: { id: 'late-task', title: '비공개 과제', position: 1 }, error: null }));
+    expect(screen.queryByText('비공개 과제')).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('새 초안')).toBeInTheDocument();
+  });
+
+  it('does not revive an insert after the owner changes A to B to A', async () => {
+    const { rerender } = renderTasks();
+    await screen.findByText('빅데이터분석기사');
+    const deferredInsert = createDeferred<{ data: TaskRow; error: null }>();
+    nextTaskInsert = () => deferredInsert.promise;
+    fireEvent.click(screen.getByRole('button', { name: /장기 과제 추가/i }));
+    fireEvent.change(screen.getByPlaceholderText('장기 과제를 입력하세요 (예: 빅데이터분석기사)'), { target: { value: '이전 세션 과제' } });
+    fireEvent.click(screen.getByRole('button', { name: '추가' }));
+    rerender(<LongTermTasks userId="user-2" />);
+    rerender(<LongTermTasks userId="user-1" />);
+    await screen.findByText('빅데이터분석기사');
+    await act(async () => deferredInsert.resolve({ data: { id: 'late-task', title: '이전 세션 과제', position: 1 }, error: null }));
+    expect(screen.queryByText('이전 세션 과제')).not.toBeInTheDocument();
+  });
+
+  it('does not refetch the old owner when a rename fails after an account switch', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { rerender } = renderTasks();
+    await screen.findByText('빅데이터분석기사');
+    const deferredUpdate = createDeferred<UpdateResult>();
+    tasksTable.update.mockImplementationOnce(() => ({ eq: () => deferredUpdate.promise }));
+    fireEvent.click(within(getRowForTitle('빅데이터분석기사')).getAllByRole('button')[0]);
+    fireEvent.change(screen.getByDisplayValue('빅데이터분석기사'), { target: { value: '이전 이름 수정' } });
+    fireEvent.keyDown(screen.getByDisplayValue('이전 이름 수정'), { key: 'Enter' });
+    longTermTasks = [{ id: 'task-b', title: '새 사용자 과제', position: 0 }];
+    subtasks = [];
+    rerender(<LongTermTasks userId="user-2" />);
+    await screen.findByText('새 사용자 과제');
+    const readCount = tasksTable.select.mock.calls.length;
+    await act(async () => deferredUpdate.resolve({ error: { message: 'old request failed' } }));
+    expect(tasksTable.select).toHaveBeenCalledTimes(readCount);
+    expect(screen.getByText('새 사용자 과제')).toBeInTheDocument();
+  });
+
+  it('ignores late realtime callbacks and failed mutations after unmount', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const view = renderTasks();
+    await screen.findByText('챕터 2');
+    const deferredUpdate = createDeferred<UpdateResult>();
+    subtaskUpdateResultFactories.push(() => deferredUpdate.promise);
+    fireEvent.click(within(getRowForTitle('챕터 2')).getAllByRole('button')[SUBTASK_TOGGLE]);
+    const oldChannels = [...channelMocks];
+    view.unmount();
+    const readCount = tasksTable.select.mock.calls.length;
+    await act(async () => {
+      oldChannels.forEach(channel => channel.handlers.forEach(handler => handler.callback()));
+      deferredUpdate.resolve({ error: { message: 'old request failed' } });
+    });
+    expect(tasksTable.select).toHaveBeenCalledTimes(readCount);
+  });
+
+  it('keeps a new owner read valid when a removed channel fires late', async () => {
+    const { rerender } = renderTasks();
+    await screen.findByText('빅데이터분석기사');
+    const oldChannels = [...channelMocks];
+    longTermTasks = [{ id: 'task-b', title: '새 사용자 과제', position: 0 }];
+    subtasks = [];
+    deferFetch = true;
+    rerender(<LongTermTasks userId="user-2" />);
+    await waitFor(() => expect(pendingFetchResolvers).toHaveLength(1));
+    const readCount = tasksTable.select.mock.calls.length;
+    await act(async () => oldChannels.forEach(channel => channel.handlers.forEach(handler => handler.callback())));
+    expect(tasksTable.select).toHaveBeenCalledTimes(readCount);
+    await act(async () => pendingFetchResolvers[0]());
+    expect(screen.getByText('새 사용자 과제')).toBeInTheDocument();
+  });
+
+  it('does not reuse callbacks from the disposed StrictMode lifetime', async () => {
+    render(<StrictMode><LongTermTasks userId="user-1" /></StrictMode>);
+    await screen.findByText('빅데이터분석기사');
+    const readCount = tasksTable.select.mock.calls.length;
+    await act(async () => channelMocks[0].handlers.forEach(handler => handler.callback()));
+    expect(tasksTable.select).toHaveBeenCalledTimes(readCount);
+    await act(async () => channelMocks.at(-1)!.handlers.forEach(handler => handler.callback()));
+    expect(tasksTable.select).toHaveBeenCalledTimes(readCount + 1);
+  });
+
+  it('does not let the old toggle rollback or unlock a new A-session toggle', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { rerender } = renderTasks();
+    await screen.findByText('챕터 2');
+    const previousToggle = createDeferred<UpdateResult>();
+    subtaskUpdateResultFactories.push(() => previousToggle.promise);
+    fireEvent.click(within(getRowForTitle('챕터 2')).getAllByRole('button')[SUBTASK_TOGGLE]);
+    await act(async () => {});
+    rerender(<LongTermTasks userId="user-2" />);
+    rerender(<LongTermTasks userId="user-1" />);
+    await screen.findByText('챕터 2');
+    expect(within(getRowForTitle('챕터 2')).getAllByRole('button')[SUBTASK_TOGGLE]).not.toBeDisabled();
+    const currentToggle = createDeferred<UpdateResult>();
+    subtaskUpdateResultFactories.push(() => currentToggle.promise);
+    fireEvent.click(within(getRowForTitle('챕터 2')).getAllByRole('button')[SUBTASK_TOGGLE]);
+    const readCount = tasksTable.select.mock.calls.length;
+    await act(async () => previousToggle.reject(new Error('previous toggle failed')));
+    expect(tasksTable.select).toHaveBeenCalledTimes(readCount);
+    expect(screen.getByText('챕터 2')).toHaveClass('line-through');
+    expect(within(getRowForTitle('챕터 2')).getAllByRole('button')[SUBTASK_TOGGLE]).toBeDisabled();
+    await act(async () => currentToggle.resolve({ error: null }));
+    expect(within(getRowForTitle('챕터 2')).getAllByRole('button')[SUBTASK_TOGGLE]).not.toBeDisabled();
+  });
+
+  it('does not append an old subtask or clear the new subtask form after A to B to A', async () => {
+    const { rerender } = renderTasks();
+    await screen.findByText('챕터 2');
+    const oldInsert = createDeferred<{ data: Omit<SubtaskRow, 'long_term_task_id'>; error: null }>();
+    subtasksTable.insert.mockImplementationOnce(() => ({ select: () => ({ single: () => oldInsert.promise }) }));
+    fireEvent.click(screen.getByRole('button', { name: /세부 할 일 추가/i }));
+    fireEvent.change(screen.getByPlaceholderText('세부 할 일을 입력하세요'), { target: { value: '이전 세부 과제' } });
+    fireEvent.click(screen.getByRole('button', { name: '추가' }));
+    rerender(<LongTermTasks userId="user-2" />);
+    rerender(<LongTermTasks userId="user-1" />);
+    await screen.findByText('챕터 2');
+    expect(screen.queryByPlaceholderText('세부 할 일을 입력하세요')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /세부 할 일 추가/i }));
+    fireEvent.change(screen.getByPlaceholderText('세부 할 일을 입력하세요'), { target: { value: '현재 세부 초안' } });
+    await act(async () => oldInsert.resolve({ data: { id: 'old-subtask', title: '이전 세부 과제', position: 2, completed_at: null }, error: null }));
+    expect(screen.queryByText('이전 세부 과제')).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('현재 세부 초안')).toBeInTheDocument();
+  });
+
+  it.each(['task', 'subtask'])('does not apply a delayed %s deletion to a new A session', async (kind) => {
+    const { rerender } = renderTasks();
+    await screen.findByText('챕터 2');
+    const deleted = createDeferred<UpdateResult>();
+    const table = kind === 'task' ? tasksTable : subtasksTable;
+    table.delete.mockImplementationOnce(() => ({ eq: () => deleted.promise }));
+    if (kind === 'task') {
+      fireEvent.click(within(getRowForTitle('빅데이터분석기사')).getAllByRole('button')[1]);
+    } else {
+      fireEvent.click(within(getRowForTitle('챕터 2')).getAllByRole('button')[SUBTASK_DELETE]);
+    }
+    fireEvent.click(screen.getByRole('button', { name: '삭제' }));
+    rerender(<LongTermTasks userId="user-2" />);
+    rerender(<LongTermTasks userId="user-1" />);
+    await screen.findByText('챕터 2');
+    await act(async () => deleted.resolve({ error: null }));
+    expect(screen.getByText('빅데이터분석기사')).toBeInTheDocument();
+    expect(screen.getByText('챕터 2')).toBeInTheDocument();
+  });
+
+  it.each(['rename', 'reorder'])('does not recover an old subtask %s failure into the new owner', async (action) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { rerender } = renderTasks();
+    await screen.findByText('챕터 2');
+    const oldUpdate = createDeferred<UpdateResult>();
+    subtaskUpdateResultFactories.push(() => oldUpdate.promise);
+    if (action === 'rename') {
+      fireEvent.click(within(getRowForTitle('챕터 2')).getAllByRole('button')[SUBTASK_EDIT]);
+      fireEvent.change(screen.getByDisplayValue('챕터 2'), { target: { value: '이전 수정' } });
+      fireEvent.keyDown(screen.getByDisplayValue('이전 수정'), { key: 'Enter' });
+    } else {
+      act(() => dragHandlers.at(-1)!({ active: { id: 'subtask-2' }, over: { id: 'subtask-1' } } as DragEndEvent));
+    }
+    await act(async () => {});
+    longTermTasks = [{ id: 'task-b', title: '새 사용자 과제', position: 0 }];
+    subtasks = [];
+    rerender(<LongTermTasks userId="user-2" />);
+    await screen.findByText('새 사용자 과제');
+    const readCount = tasksTable.select.mock.calls.length;
+    await act(async () => oldUpdate.resolve({ error: { message: 'old update failed' } }));
+    expect(tasksTable.select).toHaveBeenCalledTimes(readCount);
+    expect(screen.getByText('새 사용자 과제')).toBeInTheDocument();
+  });
+
+  it('clears the editing and deletion UI when the owner changes', async () => {
+    const { rerender } = renderTasks();
+    await screen.findByText('챕터 2');
+    fireEvent.click(within(getRowForTitle('빅데이터분석기사')).getAllByRole('button')[0]);
+    fireEvent.change(screen.getByDisplayValue('빅데이터분석기사'), { target: { value: '비공개 수정 초안' } });
+    fireEvent.click(within(getRowForTitle('챕터 2')).getAllByRole('button')[SUBTASK_DELETE]);
+    expect(screen.getByText('세부 할 일 삭제')).toBeInTheDocument();
+    rerender(<LongTermTasks userId="user-2" />);
+    expect(screen.queryByDisplayValue('비공개 수정 초안')).not.toBeInTheDocument();
+    expect(screen.queryByText('세부 할 일 삭제')).not.toBeInTheDocument();
+    rerender(<LongTermTasks userId="user-1" />);
+    await screen.findByText('빅데이터분석기사');
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
   });
 
   it('disables the toggle while pending and rolls back when the write fails', async () => {

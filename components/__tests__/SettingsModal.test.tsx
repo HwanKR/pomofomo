@@ -35,6 +35,10 @@ vi.mock('react-hot-toast', () => ({
   default: toastMock,
 }));
 
+vi.mock('@/lib/pushSubscriptionLifecycle', () => ({
+  signOutWithPushCleanup: () => supabaseMock.auth.signOut(),
+}));
+
 vi.mock('../NotificationManager', () => ({
   default: ({ mode }: { mode: string }) => (
     <div data-mode={mode} data-testid="notification-manager" />

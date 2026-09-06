@@ -1,5 +1,6 @@
 'use client';
 
+import { signOutWithPushCleanup } from '@/lib/pushSubscriptionLifecycle';
 import { useState, useEffect } from 'react';
 import { Session } from '@supabase/supabase-js';
 import { format } from 'date-fns';
@@ -80,7 +81,7 @@ export default function Dashboard({ session }: DashboardProps) {
   };
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    await signOutWithPushCleanup();
   };
 
   const { theme, isDarkMode, toggleDarkMode } = useTheme();

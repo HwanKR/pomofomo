@@ -649,7 +649,12 @@ export const useStudySession = ({
         await supabase.from('profiles').update({
           status: 'online',
           last_active_at: new Date().toISOString(),
-        }).eq('id', user.id);
+        }).eq('id', user.id)
+          // Do not overwrite the source device's running state or the
+          // timestamp anchoring its paused study time before hydration reads it.
+          .in('status', ['online', 'offline'])
+          .is('study_start_time', null)
+          .eq('total_stopwatch_time', 0);
       }
     };
     setOnline();
@@ -700,7 +705,7 @@ export const useStudySession = ({
 
         const { data } = await supabase
           .from('profiles')
-          .select('status, study_start_time, total_stopwatch_time, timer_type, timer_mode, timer_duration')
+          .select('status, study_start_time, total_stopwatch_time, timer_type, timer_mode, timer_duration, last_active_at')
           .eq('id', user.id)
           .single();
 
