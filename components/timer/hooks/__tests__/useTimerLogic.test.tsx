@@ -303,6 +303,29 @@ describe('useTimerLogic', () => {
         { initialProps: { settings: initialSettings }, wrapper: StrictMode }
       );
 
+    it('uses the scheduled auto-start duration even if settings change during its delay', () => {
+      const { result, rerender } = renderTimer();
+      const scheduledBreak = 5 * 60;
+      rerender({ settings: { ...defaultSettings, shortBreak: 10 } });
+
+      act(() => {
+        result.current.startTimer({
+          mode: 'shortBreak', remainingSeconds: scheduledBreak, durationSeconds: scheduledBreak,
+        });
+      });
+      expect(result.current.timerDuration).toBe(scheduledBreak);
+      expect(mockUpdateStatus).toHaveBeenLastCalledWith(
+        'online', undefined, new Date().toISOString(), undefined, 'timer', 'shortBreak', scheduledBreak
+      );
+
+      act(() => { vi.advanceTimersByTime(60_000); });
+      act(() => { result.current.toggleTimer(); });
+      expect(result.current.timeLeft).toBe(240);
+      expect(mockUpdateStatus).toHaveBeenLastCalledWith(
+        'paused', undefined, undefined, 60, 'timer', 'shortBreak', scheduledBreak
+      );
+    });
+
     it('re-syncs an idle focus timer to the new pomoTime', () => {
       const { result, rerender } = renderTimer();
       expect(result.current.timeLeft).toBe(25 * 60);
