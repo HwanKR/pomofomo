@@ -198,7 +198,7 @@ export function useStudyStats(sessionUserId?: string | null) {
         for (const session of allSessions) {
           const createdAt = session.created_at ? new Date(session.created_at) : null;
           if (createdAt && !Number.isNaN(createdAt.getTime())) {
-            const firstYear = createdAt.getFullYear();
+            const firstYear = getDayStart(createdAt).getFullYear();
             setEarliestYear((prev) =>
               prev === null || firstYear < prev ? firstYear : prev
             );
