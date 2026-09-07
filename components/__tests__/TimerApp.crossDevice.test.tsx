@@ -7,9 +7,11 @@ import TimerApp from '../TimerApp';
 // the actual RPC segments, not the duration passed to a mocked save hook.
 const mocks = vi.hoisted(() => ({
   displayProps: [] as Record<string, unknown>[],
+  stopwatchProps: [] as Record<string, unknown>[],
   from: vi.fn(),
   rpc: vi.fn(),
   getUser: vi.fn(),
+  getSession: vi.fn(),
   setSettings: vi.fn(),
   persistSettings: vi.fn(),
   setSelectedTask: vi.fn(),
@@ -25,7 +27,11 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/supabase', () => ({
-  supabase: { from: mocks.from, rpc: mocks.rpc, auth: { getUser: mocks.getUser } },
+  supabase: {
+    from: mocks.from,
+    rpc: (...args: unknown[]) => ({ setHeader: () => mocks.rpc(...args) }),
+    auth: { getUser: mocks.getUser, getSession: mocks.getSession },
+  },
 }));
 vi.mock('@/components/timer/hooks/useSettings', () => ({
   useSettings: () => ({ settings: mocks.settings, setSettings: mocks.setSettings, persistSettings: mocks.persistSettings }),
@@ -45,7 +51,12 @@ vi.mock('@/components/timer/hooks/useTasks', () => ({
 }));
 vi.mock('@/components/TaskSidebar', () => ({ default: () => null }));
 vi.mock('@/components/timer/ui/TaskModal', () => ({ TaskModal: () => null }));
-vi.mock('@/components/timer/ui/StopwatchDisplay', () => ({ StopwatchDisplay: () => null }));
+vi.mock('@/components/timer/ui/StopwatchDisplay', () => ({
+  StopwatchDisplay: (props: Record<string, unknown>) => {
+    mocks.stopwatchProps.push(props);
+    return null;
+  },
+}));
 vi.mock('@/components/timer/ui/ThemeBackground', () => ({ ThemeBackground: () => null }));
 vi.mock('@/components/timer/ui/TimerDisplay', () => ({
   TimerDisplay: (props: Record<string, unknown>) => {
@@ -80,6 +91,8 @@ let heldProfileRead: Promise<Profile | null> | null;
 
 const lastProps = () => mocks.displayProps.at(-1)!;
 const clickTimer = (name: string) => (lastProps()[name] as () => void)();
+const lastStopwatchProps = () => mocks.stopwatchProps.at(-1)!;
+const clickStopwatch = (name: string) => (lastStopwatchProps()[name] as () => void)();
 const persisted = () => JSON.parse(window.localStorage.getItem(STATE_KEY)!);
 const lastRpc = () => mocks.rpc.mock.calls.at(-1)![1] as RpcParams;
 const savedSeconds = () => lastRpc().p_segments.reduce((sum, segment) => sum + segment.duration, 0);
@@ -115,11 +128,13 @@ beforeEach(() => {
   mocks.settings = { ...mocks.settings, pomoTime: 25 };
   window.localStorage.clear();
   mocks.displayProps.length = 0;
+  mocks.stopwatchProps.length = 0;
   heldProfileRead = null;
   profile = pausedProfile();
   vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'https://handoff.supabase.co');
   window.localStorage.setItem('sb-handoff-auth-token', JSON.stringify({ user: { id: 'user-1' } }));
   mocks.getUser.mockResolvedValue({ data: { user: { id: 'user-1' } } });
+  mocks.getSession.mockResolvedValue({ data: { session: { user: { id: 'user-1' }, access_token: 'owner-token' } }, error: null });
   mocks.rpc.mockImplementation(async (_name: string, args: RpcParams) => ({
     data: { status: 'saved', total_seconds: args.p_segments.reduce((sum, segment) => sum + segment.duration, 0) },
     error: null,
@@ -156,6 +171,61 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.unstubAllEnvs();
+});
+
+describe('TimerApp cross-device stopwatch handoff', () => {
+  it.each(['paused', 'studying', 'offline'] as const)('saves imported %s ten minutes plus one new minute', async (status) => {
+    const importedAt = Date.now();
+    profile = pausedProfile({
+      timer_type: 'stopwatch', timer_duration: 0, status,
+      ...(status !== 'paused' ? {
+        study_start_time: new Date(importedAt - 600_000).toISOString(),
+        total_stopwatch_time: 0,
+      } : {}),
+    });
+    await mount();
+    expect(lastStopwatchProps().stopwatchTime).toBe(600);
+    expect(lastStopwatchProps().isStopwatchRunning).toBe(status !== 'paused');
+    if (status === 'paused') {
+      await act(async () => { vi.advanceTimersByTime(30 * 60_000); });
+      await act(async () => clickStopwatch('onToggleStopwatch'));
+    }
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    await act(async () => clickStopwatch('onSaveStopwatch'));
+    expect(savedSeconds()).toBe(660);
+    expect(lastRpc().p_segments.some(segment => segment.duration === 600 && new Date(segment.ended_at).getTime() === importedAt)).toBe(true);
+    expect(persisted().stopwatch.elapsed).toBe(0);
+  });
+
+  it.each(['paused', 'studying'] as const)('persists imported %s stopwatch time before reload without server access', async (status) => {
+    profile = pausedProfile({
+      timer_type: 'stopwatch', timer_duration: 0, status,
+      ...(status === 'studying' ? {
+        study_start_time: new Date(Date.now() - 600_000).toISOString(), total_stopwatch_time: 0,
+      } : {}),
+    });
+    const view = await mount();
+    expect(persisted().stopwatch.elapsed).toBe(600);
+    expect(persisted().intervals).toHaveLength(1);
+    view.unmount();
+    profile = null;
+    await mount();
+    expect(lastStopwatchProps().stopwatchTime).toBe(600);
+    if (status === 'paused') await act(async () => clickStopwatch('onToggleStopwatch'));
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    await act(async () => clickStopwatch('onSaveStopwatch'));
+    expect(savedSeconds()).toBe(660);
+  });
+
+  it('preserves unfinished local focus when the newer remote profile is a stopwatch', async () => {
+    seedLocal(300, 0, Date.now() - 600_000);
+    profile = pausedProfile({ timer_type: 'stopwatch', timer_duration: 0 });
+    await mount();
+    expect(lastProps().timeLeft).toBe(1200);
+    expect(mocks.stopwatchProps).toHaveLength(0);
+    await act(async () => clickTimer('onSaveTimer'));
+    expect(savedSeconds()).toBe(300);
+  });
 });
 
 describe('TimerApp cross-device focus handoff', () => {
