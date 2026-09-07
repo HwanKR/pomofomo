@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { getStudyDayRange } from '@/lib/dateUtils';
 import { Session } from '@supabase/supabase-js';
@@ -47,7 +47,11 @@ function normalizeFriendProfile(
   return friend;
 }
 
-export default function FriendList({ session, refreshTrigger }: FriendListProps) {
+export default function FriendList(props: FriendListProps) {
+  return <FriendListContent key={props.session.user.id} {...props} />;
+}
+
+function FriendListContent({ session, refreshTrigger }: FriendListProps) {
   const [friends, setFriends] = useState<Friendship[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -55,8 +59,12 @@ export default function FriendList({ session, refreshTrigger }: FriendListProps)
   const [deletingFriend, setDeletingFriend] = useState<{ id: string; name: string; friendId: string } | null>(null);
   const [selectedFriendForReport, setSelectedFriendForReport] = useState<{ id: string; name: string } | null>(null);
   const [studyTimes, setStudyTimes] = useState<Record<string, number>>({});
+  const studyTimeRequestRef = useRef(0);
+  const friendsRequestRef = useRef(0);
+  const friendIdsRef = useRef<Set<string> | null>(null);
 
   const fetchStudyTimes = useCallback(async () => {
+    const requestId = ++studyTimeRequestRef.current;
     try {
       // 공부일(로컬 05:00 경계) 절대 범위를 서버에 전달한다 — lib/dateUtils.ts 정책 참고
       const { start, end } = getStudyDayRange();
@@ -65,6 +73,8 @@ export default function FriendList({ session, refreshTrigger }: FriendListProps)
         p_start_time: start.toISOString(),
         p_end_time: end.toISOString(),
       });
+
+      if (requestId !== studyTimeRequestRef.current) return;
 
       if (error) {
         console.error('Error fetching friends study time:', error);
@@ -84,6 +94,7 @@ export default function FriendList({ session, refreshTrigger }: FriendListProps)
   }, [session.user.id]);
 
   const fetchFriends = useCallback(async () => {
+    const requestId = ++friendsRequestRef.current;
     try {
       const { data, error } = await supabase
         .from('friendships')
@@ -105,9 +116,11 @@ export default function FriendList({ session, refreshTrigger }: FriendListProps)
         .eq('user_id', session.user.id)
         .order('created_at', { ascending: false });
 
+      if (requestId !== friendsRequestRef.current) return;
       if (error) throw error;
 
       const friendshipRows = (data ?? []) as FriendshipRow[];
+      friendIdsRef.current = new Set(friendshipRows.map((row) => row.friend_id));
       setFriends(
         friendshipRows.flatMap((row) => {
           const friend = normalizeFriendProfile(row.friend);
@@ -121,18 +134,19 @@ export default function FriendList({ session, refreshTrigger }: FriendListProps)
     } catch (error) {
       console.error('Error fetching friends:', error);
     } finally {
-      setLoading(false);
+      if (requestId === friendsRequestRef.current) setLoading(false);
     }
   }, [session.user.id]);
 
   useEffect(() => {
+    let cancelled = false;
     const load = async () => {
       await Promise.all([fetchFriends(), fetchStudyTimes()]);
     };
     void load();
 
     const channel = supabase
-      .channel('friend-list-updates')
+      .channel(`friend-list-updates-${session.user.id}`)
       .on(
         'postgres_changes',
         {
@@ -141,11 +155,10 @@ export default function FriendList({ session, refreshTrigger }: FriendListProps)
           table: 'profiles',
         },
         (payload) => {
-          console.log('[Friend Realtime] profiles UPDATE received:', payload.new);
+          if (cancelled) return;
           setFriends((prev) =>
             prev.map((f) => {
               if (f.friend_id === payload.new.id) {
-                console.log('[Friend Realtime] Updating friend:', f.friend_id);
                 return {
                   ...f,
                   friend: {
@@ -163,14 +176,32 @@ export default function FriendList({ session, refreshTrigger }: FriendListProps)
           );
         }
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'study_sessions' },
+        (payload) => {
+          if (cancelled) return;
+          const nextRow = payload.new as { user_id?: string };
+          const previousRow = payload.old as { user_id?: string };
+          const changedUserId = nextRow.user_id ?? previousRow.user_id;
+          // DELETE payloads may contain only the primary key under RLS.
+          if (!changedUserId || !friendIdsRef.current || friendIdsRef.current.has(changedUserId)) {
+            void fetchStudyTimes();
+          }
+        }
+      )
       .subscribe((status) => {
-        console.log('[Friend Realtime] Subscription status:', status);
+        // Reconcile records saved before the subscription or during a reconnect.
+        if (!cancelled && status === 'SUBSCRIBED') void fetchStudyTimes();
       });
 
     return () => {
+      cancelled = true;
+      studyTimeRequestRef.current += 1;
+      friendsRequestRef.current += 1;
       supabase.removeChannel(channel);
     };
-  }, [fetchFriends, fetchStudyTimes, refreshTrigger]);
+  }, [fetchFriends, fetchStudyTimes, refreshTrigger, session.user.id]);
 
   const confirmDelete = (friend: Friendship) => {
     setDeletingFriend({
