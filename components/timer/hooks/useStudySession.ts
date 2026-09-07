@@ -199,20 +199,32 @@ export const clearPendingSessionsForUser = (userId: string) => {
 // (The server-side idempotency contract still covers cross-tab races.)
 const recoveringSessionIds = new Set<string>();
 
-const callRecordBatchRpc = (draft: {
+const callRecordBatchRpc = async (draft: {
   sessionId: string;
+  ownerId: string;
   mode: string;
   task: string | null;
   taskId: string | null;
   segments: SessionSegment[];
-}) =>
-  supabase.rpc('record_study_session_batch', {
+}, isCurrent: () => boolean = () => true) => {
+  const { data: { session }, error } = await supabase.auth.getSession();
+  if (error) throw error;
+  if (
+    !session || session.user.id !== draft.ownerId ||
+    getCurrentUserId() !== draft.ownerId || !isCurrent()
+  ) return null;
+
+  // Bind this request to the draft owner's token. The shared client's auth
+  // can change before its lazy request starts or retries; it must never
+  // pick up the next account's credentials for this record.
+  return supabase.rpc('record_study_session_batch', {
     p_batch_id: draft.sessionId,
     p_mode: draft.mode,
     p_task: draft.task,
     p_task_id: draft.taskId,
     p_segments: draft.segments,
-  });
+  }).setHeader('Authorization', `Bearer ${session.access_token}`);
+};
 
 // SQLSTATEs the recording RPC raises for inputs that can never succeed.
 // Anything else (missing code, PostgREST/network failures) is retryable.
@@ -306,6 +318,7 @@ export const useStudySession = ({
   onRecordSaved,
   selectedTaskTitle,
 }: UseStudySessionProps) => {
+  const ownerId = isLoggedIn ? getCurrentUserId() : null;
   const [isSaving, setIsSaving] = useState(false);
   const [intervals, setIntervals] = useState<{ start: number; end: number }[]>([]);
   // Ref-based lock to prevent duplicate saves (sync check, unlike useState)
@@ -455,7 +468,13 @@ export const useStudySession = ({
       };
 
       try {
-        const { data, error } = await callRecordBatchRpc({ sessionId: record.sessionId, ...payload });
+        const response = await callRecordBatchRpc({ sessionId: record.sessionId, ownerId: record.ownerId, ...payload });
+        if (!response) {
+          recoveringSessionIds.delete(record.sessionId);
+          toast.dismiss(toastId);
+          return 'skipped';
+        }
+        const { data, error } = response;
 
         if (!error) {
           // 'saved' and 'already_processed' are both durable success: the
@@ -557,18 +576,17 @@ export const useStudySession = ({
   onRecordSavedRef.current = onRecordSaved;
 
   useEffect(() => {
-    if (!isLoggedIn || typeof window === 'undefined') return;
+    if (!ownerId || typeof window === 'undefined') return;
     let cancelled = false;
+    const isCurrent = () => !cancelled && getCurrentUserId() === ownerId;
 
     const recoverOrphanedDrafts = async () => {
       const drafts = readPendingSessions();
       if (Object.keys(drafts).length === 0) return;
 
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user || cancelled) return;
-
       let recoveredSeconds = 0;
       for (const [sessionId, rawDraft] of Object.entries(drafts)) {
+        if (!isCurrent()) break;
         // Skip drafts owned by an in-flight interactive save or another
         // recovery pass (savePendingRecord registers its record id here).
         if (recoveringSessionIds.has(sessionId)) {
@@ -583,13 +601,25 @@ export const useStudySession = ({
           continue;
         }
         // Drafts from another account stay put until that account signs in.
-        if (draft.ownerId !== user.id) continue;
+        if (draft.ownerId !== ownerId) continue;
         // Flagged drafts are terminal: the server already gave its verdict.
         if (draft.state) continue;
 
-        recoveringSessionIds.add(sessionId);
+        let claimed = false;
         try {
-          const { data, error } = await callRecordBatchRpc(draft);
+          const response = await callRecordBatchRpc(draft, () => {
+            if (!isCurrent() || recoveringSessionIds.has(sessionId)) return false;
+            // Claim after session lookup so a cancelled StrictMode setup
+            // cannot block the replacement effect without ever sending.
+            recoveringSessionIds.add(sessionId);
+            claimed = true;
+            return true;
+          });
+          if (!response) {
+            if (!isCurrent()) break;
+            continue;
+          }
+          const { data, error } = response;
           if (!error) {
             // 'already_processed' proves the original attempt landed; only a
             // fresh 'saved' contributes to the recovered-time toast.
@@ -625,11 +655,11 @@ export const useStudySession = ({
           // Transport failure: keep the draft for the next mount.
           console.error('Failed to recover pending session draft', e);
         } finally {
-          recoveringSessionIds.delete(sessionId);
+          if (claimed) recoveringSessionIds.delete(sessionId);
         }
       }
 
-      if (!cancelled && recoveredSeconds > 0) {
+      if (isCurrent() && recoveredSeconds > 0) {
         toast.success(`보관 중이던 ${formatKoreanDuration(recoveredSeconds)} 기록을 저장했습니다!`);
         onRecordSavedRef.current();
       }
@@ -639,7 +669,7 @@ export const useStudySession = ({
     return () => {
       cancelled = true;
     };
-  }, [isLoggedIn]);
+  }, [ownerId]);
 
   // Set online on mount / offline on unmount
   useEffect(() => {

@@ -1117,25 +1117,43 @@ export default function TimerApp({
           return;
         }
 
-        // Stopwatch behavior is unchanged by the focus-session handoff.
-        if (data.status === 'studying' && data.study_start_time) {
-          const startTime = new Date(data.study_start_time).getTime();
-          const elapsed = Math.floor((now - startTime) / 1000);
-          if (elapsed >= 0) {
-            sessionRevisionRef.current += 1;
-            setTab('stopwatch');
-            setStopwatchTime(elapsed);
-            setIsStopwatchRunning(true);
-            stopwatchStartTimeRef.current = startTime;
-            currentIntervalStartRef.current = now;
-            toast.success('다른 기기에서 진행 중인 스톱워치를 불러왔습니다.', { icon: '🔄' });
-          }
-        } else if (data.total_stopwatch_time && data.total_stopwatch_time >= (local?.stopwatch.elapsed || 0)) {
-          sessionRevisionRef.current += 1;
-          setTab('stopwatch');
-          setStopwatchTime(data.total_stopwatch_time);
-          setIsStopwatchRunning(false);
-        }
+        const currentSettings = readSettingsSnapshot();
+        const focusDuration = currentSettings.pomoTime * 60;
+        const localDuration = local?.timer.duration
+          ?? (local ? local.configuredDurations?.[local.timer.mode] : undefined)
+          ?? (local?.timer.mode === 'shortBreak' ? currentSettings.shortBreak * 60
+            : local?.timer.mode === 'longBreak' ? currentSettings.longBreak * 60 : focusDuration);
+        // An unrelated remote stopwatch cannot consume unfinished local focus
+        // or break progress. The two clocks share one interval ledger.
+        if (local && localDuration - local.timer.timeLeft > (local.timer.loggedSeconds || 0)) return;
+
+        const startTime = data.study_start_time ? new Date(data.study_start_time).getTime() : NaN;
+        const running = Number.isFinite(startTime);
+        const elapsed = running ? Math.floor((now - startTime) / 1000) : data.total_stopwatch_time || 0;
+        if (!Number.isFinite(elapsed) || elapsed <= 0 || elapsed >= 24 * 60 * 60 || elapsed < (local?.stopwatch.elapsed || 0)) return;
+        const endedAt = running || !Number.isFinite(remoteUpdated) ? now : Math.min(now, remoteUpdated);
+        // Preserve the source device's known total before opening a new local
+        // interval. Otherwise the next save only records work since import.
+        const importedIntervals = [{ start: endedAt - elapsed * 1000, end: endedAt }];
+        const currentStart = running ? now : null;
+        const cycle = local?.timer.cycleCount || 0;
+
+        setTab('stopwatch');
+        setTimerMode('focus');
+        setTimerDuration(focusDuration);
+        setTimeLeft(focusDuration);
+        setIsRunning(false);
+        setCycleCount(cycle);
+        setFocusLoggedSeconds(0);
+        endTimeRef.current = 0;
+        setStopwatchTime(elapsed);
+        setIsStopwatchRunning(running);
+        stopwatchStartTimeRef.current = running ? startTime : 0;
+        setIntervals(importedIntervals);
+        currentIntervalStartRef.current = currentStart;
+        saveState('stopwatch', 'focus', false, focusDuration, null, cycle, 0,
+          running, elapsed, running ? startTime : null, importedIntervals, currentStart, focusDuration);
+        if (running) toast.success('다른 기기에서 진행 중인 스톱워치를 불러왔습니다.', { icon: '🔄' });
       } catch (e) {
         console.error('Sync failed', e);
       }

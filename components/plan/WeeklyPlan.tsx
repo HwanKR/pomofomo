@@ -18,6 +18,7 @@ import ConfirmModal from '@/components/ConfirmModal';
 import { usePersistedState } from '@/hooks/usePersistedState';
 import { supabase } from '@/lib/supabase';
 import { cn } from '@/lib/utils';
+import { usePlanRequestScope } from './usePlanRequestScope';
 
 interface WeeklyPlan {
   id: string;
@@ -61,6 +62,11 @@ const getCurrentWeekRange = () => {
 };
 
 export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
+  return <ScopedWeeklyPlan key={userId} userId={userId} />;
+}
+
+function ScopedWeeklyPlan({ userId }: WeeklyPlanProps) {
+  const scopeRef = usePlanRequestScope();
   const [plans, setPlans] = useState<WeeklyPlan[]>([]);
   const [loading, setLoading] = useState(true);
   const [newPlanTitle, setNewPlanTitle] = useState('');
@@ -74,6 +80,10 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
   const [editedTitle, setEditedTitle] = useState('');
 
   const fetchPlans = useCallback(async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
+    const request = ++scope.request;
+    const isCurrent = () => scope.active && request === scope.request;
     if (!userId) {
       setPlans([]);
       setLoading(false);
@@ -94,6 +104,7 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
       .lte('end_date', endDate)
       .order('created_at', { ascending: true });
 
+    if (!isCurrent()) return;
     if (error) {
       console.error('Error fetching weekly plans:', error);
       setLoading(false);
@@ -113,6 +124,7 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
         .eq('user_id', userId)
         .in('task_id', planIds);
 
+      if (!isCurrent()) return;
       if (sessionsError) {
         console.error('Error fetching weekly study durations:', sessionsError);
       } else {
@@ -134,12 +146,19 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
 
     setPlans(plansWithDuration);
     setLoading(false);
-  }, [userId]);
+  }, [scopeRef, userId]);
 
   useEffect(() => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
+    const refresh = () => {
+      if (scope.active) void fetchPlans();
+    };
     const initialFetch = setTimeout(() => {
-      void fetchPlans();
+      refresh();
     }, 0);
+
+    if (!userId) return () => clearTimeout(initialFetch);
 
     const planChannel = supabase
       .channel('weekly-plan-updates')
@@ -152,7 +171,7 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
           filter: `user_id=eq.${userId}`,
         },
         () => {
-          void fetchPlans();
+          refresh();
         }
       )
       .subscribe();
@@ -168,7 +187,7 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
           filter: `user_id=eq.${userId}`,
         },
         () => {
-          void fetchPlans();
+          refresh();
         }
       )
       .subscribe();
@@ -178,9 +197,11 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
       supabase.removeChannel(planChannel);
       supabase.removeChannel(sessionChannel);
     };
-  }, [fetchPlans, userId]);
+  }, [fetchPlans, scopeRef, userId]);
 
   const addPlan = async (event: React.FormEvent) => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
     event.preventDefault();
     if (!newPlanTitle.trim()) return;
     if (!userId) {
@@ -201,6 +222,7 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
       .select('id, title, status, start_date, end_date')
       .single();
 
+    if (!scope.active) return;
     if (error) {
       console.error('Error adding plan:', error);
       return;
@@ -213,6 +235,8 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
   };
 
   const togglePlanStatus = async (plan: WeeklyPlan) => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
     const nextStatus = plan.status === 'done' ? 'todo' : 'done';
     setPlans((currentPlans) =>
       currentPlans.map((currentPlan) =>
@@ -227,6 +251,7 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
       .update({ status: nextStatus })
       .eq('id', plan.id);
 
+    if (!scope.active) return;
     if (error) {
       console.error('Error updating plan:', error);
       void fetchPlans();
@@ -244,6 +269,8 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
   };
 
   const updatePlan = async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
     if (!editingPlanId || !editedTitle.trim()) {
       cancelEditing();
       return;
@@ -269,6 +296,7 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
       .update({ title: nextTitle })
       .eq('id', planId);
 
+    if (!scope.active) return;
     if (error) {
       console.error('Error updating plan:', error);
       void fetchPlans();
@@ -276,6 +304,8 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
   };
 
   const confirmDelete = async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
     if (!deletingPlanId) return;
 
     const planId = deletingPlanId;
@@ -284,6 +314,7 @@ export default function WeeklyPlan({ userId }: WeeklyPlanProps) {
       .delete()
       .eq('id', planId);
 
+    if (!scope.active) return;
     if (error) {
       console.error('Error deleting plan:', error);
       return;

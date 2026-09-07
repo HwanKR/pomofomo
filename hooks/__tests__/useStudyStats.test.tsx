@@ -50,7 +50,7 @@ let fetchStatsRef:
   | null = null;
 
 function StatsProbe({ userId }: { userId: string | null }) {
-  const { totalFocusTime, heatmapData, chartData, fetchStats } = useStudyStats(userId);
+  const { totalFocusTime, heatmapData, chartData, earliestYear, fetchStats } = useStudyStats(userId);
 
   useEffect(() => {
     fetchStatsRef = fetchStats;
@@ -66,6 +66,8 @@ function StatsProbe({ userId }: { userId: string | null }) {
     <div>
       <div data-testid="total">{totalFocusTime}</div>
       <div data-testid="heatmap-count">{heatmapData.length}</div>
+      <div data-testid="earliest-year">{earliestYear}</div>
+      <div data-testid="heatmap-dates">{heatmapData.map((entry) => entry.date).join(',')}</div>
       <div data-testid="chart-seconds">
         {chartData.reduce((acc, bucket) => acc + bucket.seconds, 0)}
       </div>
@@ -111,6 +113,19 @@ describe('useStudyStats 로그아웃/계정 전환 잔존 데이터 방지', () 
 
   afterEach(() => {
     cleanup();
+  });
+
+  it.each([
+    { hour: 2, year: '2025', date: '2025-12-31' },
+    { hour: 5, year: '2026', date: '2026-01-01' },
+  ])('첫 기록의 공부일 기준으로 최초 연도를 계산한다 ($hour시)', async ({ hour, year, date }) => {
+    render(<StatsProbe userId="user-a" />);
+    await resolveFetchQueries(0, {
+      duration: 1800,
+      createdAt: new Date(2026, 0, 1, hour).toISOString(),
+    });
+    await waitFor(() => expect(screen.getByTestId('earliest-year').textContent).toBe(year));
+    expect(screen.getByTestId('heatmap-dates').textContent).toBe(date);
   });
 
   it('계정이 바뀌면 이전 계정의 통계·히트맵을 동기적으로 초기화한다', async () => {

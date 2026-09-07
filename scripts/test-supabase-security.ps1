@@ -4,18 +4,26 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $harnessRoot = Join-Path $projectRoot 'test-harness'
 $fixturePath = Join-Path $projectRoot 'supabase\tests\fixtures\security_base.sql'
 $baseMigrationPath = Join-Path $projectRoot 'supabase\migrations\20260807001129_harden_authorization_and_push_webhook.sql'
-$migrationPath = Join-Path $projectRoot 'supabase\migrations\20260807052639_secure_groups_storage_push.sql'
-$friendRequestDmlMigrationPath = Join-Path $projectRoot 'supabase\migrations\20260808120000_lock_friend_request_dml.sql'
-$sessionBatchMigrationPath = Join-Path $projectRoot 'supabase\migrations\20260808100000_session_batch_id_and_membership_leaderboard.sql'
-$friendsRpcMigrationPath = Join-Path $projectRoot 'supabase\migrations\20260808101500_friends_rpc_study_day_range.sql'
-$studySessionLockMigrationPath = Join-Path $projectRoot 'supabase\migrations\20260808130000_lock_study_sessions_writes_and_batch_rpc.sql'
-$planTaskIdsMigrationPath = Join-Path $projectRoot 'supabase\migrations\20260808150000_batch_rpc_accept_plan_task_ids.sql'
-$testPath = Join-Path $projectRoot 'supabase\tests\authorization_hardening.test.sql'
-$studySessionTestPath = Join-Path $projectRoot 'supabase\tests\study_session_batch.test.sql'
+# Historical migrations before this baseline cannot be replayed together. Every
+# timestamped migration after it is forward-only and must be tested, including
+# group deletion, long-term tasks, their privilege correction, and account cleanup.
+$baseMigrationName = Split-Path -Leaf $baseMigrationPath
+$migrationPaths = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'supabase\migrations') -File |
+    Where-Object { $_.Name -match '^\d{14}_.+\.sql$' -and $_.Name -gt $baseMigrationName } |
+    Sort-Object Name | Select-Object -ExpandProperty FullName)
+$testPaths = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'supabase\tests') -Filter '*.test.sql' -File |
+    Sort-Object Name | Select-Object -ExpandProperty FullName)
 $preflightPath = Join-Path $projectRoot 'supabase\verification\security_preflight.sql'
 $postflightPath = Join-Path $projectRoot 'supabase\verification\security_postflight.sql'
 $excludedServices = 'gotrue,realtime,imgproxy,kong,mailpit,postgrest,postgres-meta,studio,edge-runtime,logflare,vector,supavisor'
 $databaseContainer = 'supabase_db_fomopomo-security-test'
+$harnessConfig = Get-Content -Raw -LiteralPath (Join-Path $harnessRoot 'supabase\config.toml')
+if ($harnessConfig -notmatch '(?m)^project_id\s*=\s*"fomopomo-security-test"\s*$') {
+    throw 'Refusing to reset a database outside the fomopomo-security-test harness.'
+}
+if ($migrationPaths.Count -eq 0 -or $testPaths.Count -eq 0) {
+    throw 'The security harness requires forward migrations and database tests.'
+}
 
 function Invoke-CheckedCommand {
     param(
@@ -72,24 +80,14 @@ try {
     )
     Write-Output 'Read-only preflight query: PASS'
 
-    Invoke-LocalSqlFile -Path $migrationPath
-    Write-Output 'Forward-only migration apply: PASS'
+    foreach ($path in $migrationPaths) {
+        Invoke-LocalSqlFile -Path $path
+        Write-Output "Forward-only migration apply: PASS ($(Split-Path -Leaf $path))"
+    }
 
-    Invoke-LocalSqlFile -Path $friendRequestDmlMigrationPath
-    Write-Output 'Friend-request DML lockdown migration apply: PASS'
-
-    Invoke-LocalSqlFile -Path $sessionBatchMigrationPath
-    Invoke-LocalSqlFile -Path $friendsRpcMigrationPath
-    Invoke-LocalSqlFile -Path $studySessionLockMigrationPath
-    Write-Output 'Study-session write lockdown migration apply: PASS'
-
-    Invoke-LocalSqlFile -Path $planTaskIdsMigrationPath
-    Write-Output 'Batch RPC plan task_id migration apply: PASS'
-
-    Invoke-CheckedCommand -Arguments @(
-        'supabase', '--workdir', $harnessRoot, 'test', 'db', '--local',
-        $testPath, $studySessionTestPath
-    )
+    Invoke-CheckedCommand -Arguments (@(
+        'supabase', '--workdir', $harnessRoot, 'test', 'db', '--local'
+    ) + $testPaths)
 
     Invoke-CheckedCommand -SuppressOutput -Arguments @(
         'supabase', '--workdir', $harnessRoot, 'db', 'query', '--local',
@@ -105,7 +103,7 @@ try {
 
     Invoke-CheckedCommand -Arguments @(
         'supabase', '--workdir', $harnessRoot, 'db', 'advisors', '--local',
-        '--type', 'security'
+        '--type', 'security', '--fail-on', 'error'
     )
 }
 finally {

@@ -1,8 +1,20 @@
 create extension if not exists pgcrypto with schema extensions;
 create extension if not exists pgtap with schema extensions;
 
+-- Realtime can be disabled as a service while migrations still manage its
+-- publication. Match the application database without starting that service.
+do $$
+begin
+  if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    create publication supabase_realtime;
+  end if;
+end;
+$$;
+
 create table public.profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
+  -- Match the historical NO ACTION foreign key so the forward account cleanup
+  -- migration must repair it before Auth deletion can cascade atomically.
+  id uuid primary key references auth.users(id),
   username text,
   invite_code text default substr(md5(random()::text), 0, 8),
   status text default 'offline',
@@ -69,6 +81,39 @@ create table public.study_sessions (
   group_id uuid references public.groups(id) on delete set null
 );
 
+-- Canonical daily/weekly/monthly schemas are needed before the forward
+-- migrations run; individual tests must not replace them with permissive stubs.
+create table public.tasks (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  title text not null,
+  status text not null default 'todo',
+  due_date date not null default current_date,
+  estimated_pomodoros integer default 1,
+  created_at timestamptz default now(),
+  position double precision default 0
+);
+
+create table public.weekly_plans (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  title text not null,
+  start_date date not null,
+  end_date date not null,
+  status text default 'todo',
+  created_at timestamptz default now()
+);
+
+create table public.monthly_plans (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  title text not null,
+  month integer not null,
+  year integer not null,
+  status text default 'todo',
+  created_at timestamptz default now()
+);
+
 create table public.push_subscriptions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -111,10 +156,28 @@ alter table public.friend_requests enable row level security;
 alter table public.groups enable row level security;
 alter table public.group_members enable row level security;
 alter table public.study_sessions enable row level security;
+alter table public.tasks enable row level security;
+alter table public.weekly_plans enable row level security;
+alter table public.monthly_plans enable row level security;
 alter table public.push_subscriptions enable row level security;
 alter table public.feedbacks enable row level security;
 alter table public.feedback_replies enable row level security;
 alter table public.debug_logs enable row level security;
+
+create policy "Users can manage own tasks"
+on public.tasks for all to authenticated
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
+
+create policy "Users can manage own weekly plans"
+on public.weekly_plans for all to authenticated
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
+
+create policy "Users can manage own monthly plans"
+on public.monthly_plans for all to authenticated
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
 
 create policy "Allow insert for everyone"
 on public.debug_logs for insert to public

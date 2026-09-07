@@ -48,8 +48,10 @@ study_session_duplicate_segments as (
   from (
     select 1
     from public.study_sessions as ss
-    where ss.session_batch_id is not null
-    group by ss.user_id, ss.session_batch_id, ss.created_at, ss.duration
+    -- The preflight also runs before the migration that adds session_batch_id.
+    -- Row JSON keeps this inventory readable on both schema versions.
+    where to_jsonb(ss) ->> 'session_batch_id' is not null
+    group by ss.user_id, to_jsonb(ss) ->> 'session_batch_id', ss.created_at, ss.duration
     having count(*) > 1
   ) as d
 ),

@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
 type OwnedGroup = { id: string; name: string };
-type MemberRow = { group_id: string; user_id: string };
 type StorageObject = {
   metadata?: Record<string, unknown> | null;
   name: string;
@@ -13,8 +12,8 @@ type StorageObject = {
 type MockClientOverrides = {
   rowsByTable?: Record<string, Array<Record<string, unknown>>>;
   deleteErrors?: Record<string, unknown>;
-  ownedGroups?: OwnedGroup[];
-  memberRows?: MemberRow[];
+  blockedGroups?: OwnedGroup[];
+  groupCleanupError?: unknown;
   profileUpdateError?: unknown;
   authGetUserError?: unknown;
   storageListErrorAtCall?: number;
@@ -78,6 +77,12 @@ function createMockClient(overrides: MockClientOverrides = {}) {
   };
 
   const client = {
+    rpc: vi.fn(async () => ({
+      data: overrides.groupCleanupError ? null : overrides.blockedGroups?.length
+        ? { status: 'leader', groups: overrides.blockedGroups }
+        : { status: 'ready' },
+      error: overrides.groupCleanupError ?? null,
+    })),
     auth: {
       getUser: vi.fn(async () => ({
         data: { user: overrides.authGetUserError ? null : { id: 'user-1' } },
@@ -107,9 +112,6 @@ function createMockClient(overrides: MockClientOverrides = {}) {
         }),
         eq: vi.fn(async (column: string, value: unknown) => {
           if (mode === 'select') {
-            if (table === 'groups') {
-              return { data: overrides.ownedGroups ?? [], error: null };
-            }
             throw new Error(`Unexpected select().eq() for table ${table}`);
           }
 
@@ -135,10 +137,6 @@ function createMockClient(overrides: MockClientOverrides = {}) {
           return { error: overrides.profileUpdateError ?? null };
         }),
         in: vi.fn(async (column: string, values: unknown[]) => {
-          if (mode === 'select' && table === 'group_members') {
-            return { data: overrides.memberRows ?? [], error: null };
-          }
-
           if (mode === 'delete') {
             state.deleteInCalls.push({ table, column, values });
             return { error: null };
@@ -227,8 +225,7 @@ describe('account-reset route', () => {
 
   it('returns 409 when the user leads a group with other members', async () => {
     const { client } = createMockClient({
-      ownedGroups: [{ id: 'group-1', name: 'Study Group' }],
-      memberRows: [{ group_id: 'group-1', user_id: 'other-user' }],
+      blockedGroups: [{ id: 'group-1', name: 'Study Group' }],
     });
     const { POST } = await loadPostHandler(client);
 
@@ -355,6 +352,8 @@ describe('account-reset route', () => {
     await expect(response.json()).resolves.toEqual({ success: true });
 
     expect(state.profileUpdateCalls).toHaveLength(1);
+    expect(client.rpc).toHaveBeenCalledWith('cleanup_account_groups', { p_user_id: 'user-1' });
+    expect(state.deleteInCalls).toEqual([]);
     expect(state.profileUpdateCalls[0]).toMatchObject({
       table: 'profiles',
       column: 'id',
@@ -516,4 +515,22 @@ describe('account-reset route', () => {
       expect(state.deleteUserMock).not.toHaveBeenCalled();
     }
   );
+
+  it('stops before storage and profile reset when atomic group cleanup fails', async () => {
+    const { client, state } = createMockClient({
+      groupCleanupError: { message: 'group delete failed' },
+    });
+    const { POST } = await loadPostHandler(client);
+    const response = await POST(new NextRequest('http://localhost/api/account-reset', {
+      method: 'POST',
+      headers: { authorization: 'Bearer valid-token' },
+    }));
+
+    expect(response.status).toBe(500);
+    expect(state.deleteInCalls).toEqual([]);
+    expect(state.deleteEqCalls).toEqual([]);
+    expect(state.storageListMock).not.toHaveBeenCalled();
+    expect(state.profileUpdateCalls).toEqual([]);
+    expect(state.deleteUserMock).not.toHaveBeenCalled();
+  });
 });
