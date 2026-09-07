@@ -530,6 +530,7 @@ select is(
 with expected_service_role_functions(signature) as (
   values
     ('public.claim_push_notification_event(uuid,uuid,text,integer)'),
+    ('public.cleanup_account_groups(uuid)'),
     ('public.complete_push_notification_event(uuid,text)'),
     ('public.feedback_image_path_matches_user(uuid,text)'),
     ('public.is_safe_push_endpoint(text)')
@@ -553,7 +554,7 @@ select ok(
         and p.prokind = 'f'
         and has_function_privilege('service_role', p.oid, 'EXECUTE')
     ) = (select count(*) from expected_service_role_functions),
-  'service_role execute access is limited to the push event RPCs'
+  'service_role execute access is limited to the supported service RPCs'
 );
 
 select ok(
@@ -1286,7 +1287,7 @@ select is(
     )
     where friend_id = '00000000-0000-0000-0000-000000000002'
   ),
-  120::integer,
+  120::bigint,
   'a caller can read study time for an actual friend'
 );
 
@@ -2056,13 +2057,15 @@ select is(
   'authenticated users can read referenced private feedback upload objects'
 );
 
+with deleted as (
+  delete from storage.objects
+  where bucket_id = 'feedback-uploads'
+    and name = '00000000-0000-0000-0000-000000000001/40000000-0000-0000-0000-000000000001.png'
+  returning id
+)
 select is(
-  tests.capture_sqlstate(
-    $$delete from storage.objects
-      where bucket_id = 'feedback-uploads'
-        and name = '00000000-0000-0000-0000-000000000001/40000000-0000-0000-0000-000000000001.png'$$
-  ),
-  '42501',
+  (select count(*) from deleted),
+  0::bigint,
   'a nonowner cannot delete another user''s feedback upload object'
 );
 

@@ -110,19 +110,6 @@ values
   ('10000000-0000-0000-0000-0000000000d4', '00000000-0000-0000-0000-0000000000a1'),
   ('10000000-0000-0000-0000-0000000000d4', '00000000-0000-0000-0000-0000000000b2');
 
--- 보안 fixture에는 tasks 테이블이 없어 여기서 최소 형태로 만든다
--- (RPC는 정의자 권한으로 public.tasks의 소유만 확인한다).
-create table if not exists public.tasks (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users (id) on delete cascade,
-  title text not null,
-  status text not null default 'todo',
-  due_date date not null default current_date,
-  estimated_pomodoros integer default 1,
-  created_at timestamptz default now(),
-  position double precision default 0
-);
-
 insert into public.tasks (id, user_id, title)
 values
   ('20000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 'A의 작업'),
@@ -130,35 +117,15 @@ values
 
 -- 타이머는 weekly_plans/monthly_plans의 행도 작업으로 선택할 수 있다
 -- (20260808150000이 이 두 테이블도 task_id 소유 검증에 포함한다).
-create table if not exists public.weekly_plans (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users (id) on delete cascade,
-  title text not null,
-  status text not null default 'todo',
-  start_date date not null default current_date,
-  end_date date not null default current_date,
-  created_at timestamptz default now()
-);
-
-create table if not exists public.monthly_plans (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users (id) on delete cascade,
-  title text not null,
-  status text not null default 'todo',
-  month integer not null default extract(month from current_date),
-  year integer not null default extract(year from current_date),
-  created_at timestamptz default now()
-);
-
-insert into public.weekly_plans (id, user_id, title)
+insert into public.weekly_plans (id, user_id, title, start_date, end_date)
 values
-  ('21000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 'A의 주간 계획'),
-  ('21000000-0000-0000-0000-0000000000b2', '00000000-0000-0000-0000-0000000000b2', 'B의 주간 계획');
+  ('21000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 'A의 주간 계획', current_date, current_date),
+  ('21000000-0000-0000-0000-0000000000b2', '00000000-0000-0000-0000-0000000000b2', 'B의 주간 계획', current_date, current_date);
 
-insert into public.monthly_plans (id, user_id, title)
+insert into public.monthly_plans (id, user_id, title, month, year)
 values
-  ('22000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 'A의 월간 계획'),
-  ('22000000-0000-0000-0000-0000000000b2', '00000000-0000-0000-0000-0000000000b2', 'B의 월간 계획');
+  ('22000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 'A의 월간 계획', extract(month from current_date), extract(year from current_date)),
+  ('22000000-0000-0000-0000-0000000000b2', '00000000-0000-0000-0000-0000000000b2', 'B의 월간 계획', extract(month from current_date), extract(year from current_date));
 
 -- ---------------------------------------------------------------------------
 -- 1. 정적 권한 표면: 직접 쓰기 봉쇄와 task/삭제 UX 유지. (22)

@@ -16,8 +16,8 @@ health_timeout = "2m"
 # The historical application migrations intentionally remain untouched. They
 # predate the current baseline and cannot be replayed together. This isolated
 # harness seeds a minimal pre-remediation schema plus the prior canonical
-# hardening migration. The current forward-only migration is applied explicitly
-# by the verification script after the preflight query succeeds.
+# hardening migration. Every later timestamped migration is applied in order by
+# the verification script after the preflight query succeeds.
 [db.migrations]
 enabled = false
 schema_paths = []
