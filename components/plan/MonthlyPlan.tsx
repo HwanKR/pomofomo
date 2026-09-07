@@ -18,6 +18,7 @@ import ConfirmModal from '@/components/ConfirmModal';
 import { usePersistedState } from '@/hooks/usePersistedState';
 import { supabase } from '@/lib/supabase';
 import { cn } from '@/lib/utils';
+import { usePlanRequestScope } from './usePlanRequestScope';
 
 interface MonthlyPlan {
   id: string;
@@ -61,6 +62,11 @@ const getCurrentMonthYear = () => {
 };
 
 export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
+  return <ScopedMonthlyPlan key={userId} userId={userId} />;
+}
+
+function ScopedMonthlyPlan({ userId }: MonthlyPlanProps) {
+  const scopeRef = usePlanRequestScope();
   const [plans, setPlans] = useState<MonthlyPlan[]>([]);
   const [loading, setLoading] = useState(true);
   const [newPlanTitle, setNewPlanTitle] = useState('');
@@ -74,6 +80,10 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
   const [editedTitle, setEditedTitle] = useState('');
 
   const fetchPlans = useCallback(async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
+    const request = ++scope.request;
+    const isCurrent = () => scope.active && request === scope.request;
     if (!userId) {
       setPlans([]);
       setLoading(false);
@@ -91,6 +101,7 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
       .eq('year', year)
       .order('created_at', { ascending: true });
 
+    if (!isCurrent()) return;
     if (error) {
       console.error('Error fetching monthly plans:', error);
       setLoading(false);
@@ -110,6 +121,7 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
         .eq('user_id', userId)
         .in('task_id', planIds);
 
+      if (!isCurrent()) return;
       if (sessionsError) {
         console.error('Error fetching plan study durations:', sessionsError);
       } else {
@@ -131,12 +143,19 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
 
     setPlans(plansWithDuration);
     setLoading(false);
-  }, [userId]);
+  }, [scopeRef, userId]);
 
   useEffect(() => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
+    const refresh = () => {
+      if (scope.active) void fetchPlans();
+    };
     const initialFetch = setTimeout(() => {
-      void fetchPlans();
+      refresh();
     }, 0);
+
+    if (!userId) return () => clearTimeout(initialFetch);
 
     const planChannel = supabase
       .channel('monthly-plan-updates')
@@ -149,7 +168,7 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
           filter: `user_id=eq.${userId}`,
         },
         () => {
-          void fetchPlans();
+          refresh();
         }
       )
       .subscribe();
@@ -165,7 +184,7 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
           filter: `user_id=eq.${userId}`,
         },
         () => {
-          void fetchPlans();
+          refresh();
         }
       )
       .subscribe();
@@ -175,9 +194,11 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
       supabase.removeChannel(planChannel);
       supabase.removeChannel(sessionChannel);
     };
-  }, [fetchPlans, userId]);
+  }, [fetchPlans, scopeRef, userId]);
 
   const addPlan = async (event: React.FormEvent) => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
     event.preventDefault();
     if (!newPlanTitle.trim()) return;
     if (!userId) {
@@ -198,6 +219,7 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
       .select('id, title, status, month, year')
       .single();
 
+    if (!scope.active) return;
     if (error) {
       console.error('Error adding plan:', error);
       return;
@@ -210,6 +232,8 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
   };
 
   const togglePlanStatus = async (plan: MonthlyPlan) => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
     const nextStatus = plan.status === 'done' ? 'todo' : 'done';
     setPlans((currentPlans) =>
       currentPlans.map((currentPlan) =>
@@ -224,6 +248,7 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
       .update({ status: nextStatus })
       .eq('id', plan.id);
 
+    if (!scope.active) return;
     if (error) {
       console.error('Error updating plan:', error);
       void fetchPlans();
@@ -241,6 +266,8 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
   };
 
   const updatePlan = async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
     if (!editingPlanId || !editedTitle.trim()) {
       cancelEditing();
       return;
@@ -266,6 +293,7 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
       .update({ title: nextTitle })
       .eq('id', planId);
 
+    if (!scope.active) return;
     if (error) {
       console.error('Error updating plan:', error);
       void fetchPlans();
@@ -273,6 +301,8 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
   };
 
   const confirmDelete = async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
     if (!deletingPlanId) return;
 
     const planId = deletingPlanId;
@@ -281,6 +311,7 @@ export default function MonthlyPlan({ userId }: MonthlyPlanProps) {
       .delete()
       .eq('id', planId);
 
+    if (!scope.active) return;
     if (error) {
       console.error('Error deleting plan:', error);
       return;

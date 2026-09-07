@@ -12,6 +12,7 @@ import { usePersistedState } from '@/hooks/usePersistedState';
 import { supabase } from '@/lib/supabase';
 import { getCalendarStudyDayRange } from '@/lib/dateUtils';
 import { cn } from '@/lib/utils';
+import { usePlanRequestScope } from './usePlanRequestScope';
 
 interface TimelineProps {
   selectedDate: Date;
@@ -44,6 +45,17 @@ const formatDuration = (seconds: number) => {
 };
 
 export default function Timeline({ selectedDate, userId }: TimelineProps) {
+  return (
+    <ScopedTimeline
+      key={`${userId}:${format(selectedDate, 'yyyy-MM-dd')}`}
+      selectedDate={selectedDate}
+      userId={userId}
+    />
+  );
+}
+
+function ScopedTimeline({ selectedDate, userId }: TimelineProps) {
+  const scopeRef = usePlanRequestScope();
   const [sessions, setSessions] = useState<ProcessedSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [isExpanded, setIsExpanded] = usePersistedState(
@@ -52,6 +64,10 @@ export default function Timeline({ selectedDate, userId }: TimelineProps) {
   );
 
   const fetchSessions = useCallback(async () => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
+    const request = ++scope.request;
+    const isCurrent = () => scope.active && request === scope.request;
     if (!userId) {
       setSessions([]);
       setLoading(false);
@@ -76,6 +92,7 @@ export default function Timeline({ selectedDate, userId }: TimelineProps) {
       .lte('created_at', dayEnd.toISOString())
       .order('created_at', { ascending: true });
 
+    if (!isCurrent()) return;
     if (error) {
       console.error('Error fetching sessions:', error);
       setSessions([]);
@@ -118,12 +135,19 @@ export default function Timeline({ selectedDate, userId }: TimelineProps) {
 
     setSessions(processedSessions);
     setLoading(false);
-  }, [selectedDate, userId]);
+  }, [scopeRef, selectedDate, userId]);
 
   useEffect(() => {
+    const scope = scopeRef.current;
+    if (!scope?.active) return;
+    const refresh = () => {
+      if (scope.active) void fetchSessions();
+    };
     const initialFetch = setTimeout(() => {
-      void fetchSessions();
+      refresh();
     }, 0);
+
+    if (!userId) return () => clearTimeout(initialFetch);
 
     const channel = supabase
       .channel('timeline-updates')
@@ -136,7 +160,7 @@ export default function Timeline({ selectedDate, userId }: TimelineProps) {
           filter: `user_id=eq.${userId}`,
         },
         () => {
-          void fetchSessions();
+          refresh();
         }
       )
       .subscribe();
@@ -145,7 +169,7 @@ export default function Timeline({ selectedDate, userId }: TimelineProps) {
       clearTimeout(initialFetch);
       supabase.removeChannel(channel);
     };
-  }, [fetchSessions, userId]);
+  }, [fetchSessions, scopeRef, userId]);
 
   if (loading) {
     return <div className="p-4 text-center text-gray-500">타임라인을 불러오는 중...</div>;

@@ -18,6 +18,7 @@ import { ChevronUp, ChevronDown } from 'lucide-react';
 import { usePersistedState } from '@/hooks/usePersistedState';
 import Navbar from '../Navbar';
 import { useTheme } from '../ThemeProvider';
+import { usePlanRequestScope } from './usePlanRequestScope';
 
 interface DashboardProps {
   session: Session | null;
@@ -25,60 +26,7 @@ interface DashboardProps {
 
 export default function Dashboard({ session }: DashboardProps) {
   const [selectedDate, setSelectedDate] = useState(new Date());
-  const [focusTime, setFocusTime] = useState(0);
   const [isDailyTasksExpanded, setIsDailyTasksExpanded] = usePersistedState('dashboard_daily_expanded', true);
-
-  useEffect(() => {
-    if (!session) return;
-
-    const fetchFocusTime = async () => {
-      // Use 5 AM as day boundary for the selected date
-      const start = getCalendarDayStart(selectedDate);
-      const end = getCalendarDayEnd(selectedDate);
-
-      const { data } = await supabase
-        .from('study_sessions')
-        .select('duration')
-        .eq('user_id', session.user.id)
-        .gte('created_at', start.toISOString())
-        .lte('created_at', end.toISOString());
-
-      if (data) {
-        const total = data.reduce((acc: number, curr: { duration: number }) => acc + curr.duration, 0);
-        setFocusTime(total);
-      } else {
-        setFocusTime(0);
-      }
-    };
-
-    fetchFocusTime();
-
-    // Real-time subscription
-    const channel = supabase
-      .channel('dashboard-updates')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'study_sessions',
-        },
-        () => {
-          fetchFocusTime();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [selectedDate, session]);
-
-  const formatDuration = (seconds: number) => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    return `${h}h ${m}m`;
-  };
 
   const handleLogout = async () => {
     await signOutWithPushCleanup();
@@ -115,14 +63,11 @@ export default function Dashboard({ session }: DashboardProps) {
             </div>
 
             {/* 2. Daily Focus */}
-            <div className="order-2 bg-indigo-50 dark:bg-indigo-900/20 rounded-2xl p-6 border border-indigo-100 dark:border-indigo-800/50">
-              <h3 className="text-indigo-900 dark:text-indigo-100 font-semibold mb-2">오늘의 집중 시간</h3>
-              <p className="text-indigo-600 dark:text-indigo-300 text-sm">
-                <span className="font-bold text-2xl block mt-2">{formatDuration(focusTime)}</span>
-                <br />
-                동안 집중했습니다.
-              </p>
-            </div>
+            <DailyFocus
+              key={`${session?.user.id ?? ''}:${format(selectedDate, 'yyyy-MM-dd')}`}
+              dateKey={format(selectedDate, 'yyyy-MM-dd')}
+              userId={session?.user.id ?? ''}
+            />
 
             {/* 4. Timeline */}
             <div className="order-4">
@@ -176,6 +121,80 @@ export default function Dashboard({ session }: DashboardProps) {
           </div>
         </div>
       </main>
+    </div>
+  );
+}
+
+function DailyFocus({ dateKey, userId }: { dateKey: string; userId: string }) {
+  const [focusTime, setFocusTime] = useState(0);
+  const scopeRef = usePlanRequestScope();
+
+  useEffect(() => {
+    const scope = scopeRef.current;
+    if (!scope?.active || !userId) return;
+
+    const fetchFocusTime = async () => {
+      if (!scope.active) return;
+      const request = ++scope.request;
+      const selectedDate = new Date(`${dateKey}T05:00:00`);
+      // Use 5 AM as day boundary for the selected date
+      const start = getCalendarDayStart(selectedDate);
+      const end = getCalendarDayEnd(selectedDate);
+
+      const { data } = await supabase
+        .from('study_sessions')
+        .select('duration')
+        .eq('user_id', userId)
+        .gte('created_at', start.toISOString())
+        .lte('created_at', end.toISOString());
+
+      if (!scope.active || request !== scope.request) return;
+      if (data) {
+        const total = data.reduce((acc: number, curr: { duration: number }) => acc + curr.duration, 0);
+        setFocusTime(total);
+      } else {
+        setFocusTime(0);
+      }
+    };
+
+    fetchFocusTime();
+
+    // Real-time subscription
+    const channel = supabase
+      .channel('dashboard-updates')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'study_sessions',
+          filter: `user_id=eq.${userId}`,
+        },
+        () => {
+          fetchFocusTime();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [dateKey, scopeRef, userId]);
+
+  const formatDuration = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return `${h}h ${m}m`;
+  };
+
+  return (
+    <div className="order-2 bg-indigo-50 dark:bg-indigo-900/20 rounded-2xl p-6 border border-indigo-100 dark:border-indigo-800/50">
+      <h3 className="text-indigo-900 dark:text-indigo-100 font-semibold mb-2">오늘의 집중 시간</h3>
+      <p className="text-indigo-600 dark:text-indigo-300 text-sm">
+        <span className="font-bold text-2xl block mt-2">{formatDuration(focusTime)}</span>
+        <br />
+        동안 집중했습니다.
+      </p>
     </div>
   );
 }
