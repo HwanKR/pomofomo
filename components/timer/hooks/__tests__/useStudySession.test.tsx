@@ -1,5 +1,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createClient } from '@supabase/supabase-js';
+import { StrictMode } from 'react';
 
 const { supabaseMock, toastMock } = vi.hoisted(() => {
   const toastFn = Object.assign(vi.fn(), {
@@ -12,9 +14,12 @@ const { supabaseMock, toastMock } = vi.hoisted(() => {
     supabaseMock: {
       auth: {
         getUser: vi.fn(),
+        getSession: vi.fn(),
       },
       from: vi.fn(),
       rpc: vi.fn(),
+      rpcResult: vi.fn(),
+      setHeader: vi.fn(),
     },
     toastMock: toastFn,
   };
@@ -109,6 +114,16 @@ describe('useStudySession study records', () => {
     window.localStorage.setItem(AUTH_TOKEN_KEY, JSON.stringify({ user: { id: 'user-1' } }));
 
     supabaseMock.auth.getUser.mockResolvedValue({ data: { user: { id: 'user-1' } } });
+    supabaseMock.auth.getSession.mockImplementation(async () => {
+      const session = JSON.parse(window.localStorage.getItem(AUTH_TOKEN_KEY) ?? 'null');
+      return { data: { session: session ? { ...session, access_token: `token-${session.user.id}` } : null }, error: null };
+    });
+    supabaseMock.rpc.mockImplementation((name: string, params: RpcParams) => ({
+      setHeader: (header: string, value: string) => {
+        supabaseMock.setHeader(header, value);
+        return supabaseMock.rpcResult(name, params);
+      },
+    }));
     const profileUpdate = {
       eq: vi.fn().mockReturnThis(),
       in: vi.fn().mockReturnThis(),
@@ -122,7 +137,7 @@ describe('useStudySession study records', () => {
         eq: vi.fn(() => ({ single: vi.fn().mockResolvedValue({ data: null }) })),
       })),
     }));
-    supabaseMock.rpc.mockResolvedValue(rpcOk('saved', 60));
+    supabaseMock.rpcResult.mockResolvedValue(rpcOk('saved', 60));
   });
 
   afterEach(() => {
@@ -145,7 +160,7 @@ describe('useStudySession study records', () => {
   };
 
   it('keeps a durable labeled draft when the RPC fails; the content already moved into the record', async () => {
-    supabaseMock.rpc.mockResolvedValue(rpcNetworkError());
+    supabaseMock.rpcResult.mockResolvedValue(rpcNetworkError());
     const { result } = renderStudySession();
 
     const end = Date.now();
@@ -213,7 +228,7 @@ describe('useStudySession study records', () => {
 
   it('retries the same record with a byte-identical payload, and treats already_processed as saved', async () => {
     // First attempt: the server committed the batch but the response was lost.
-    supabaseMock.rpc
+    supabaseMock.rpcResult
       .mockResolvedValueOnce(rpcNetworkError())
       .mockResolvedValueOnce(rpcOk('already_processed', 60));
     const { result } = renderStudySession();
@@ -249,7 +264,7 @@ describe('useStudySession study records', () => {
   });
 
   it('parks an unlabeled-save conflict in an explicit conflict state', async () => {
-    supabaseMock.rpc.mockResolvedValueOnce(rpcConflictError());
+    supabaseMock.rpcResult.mockResolvedValueOnce(rpcConflictError());
     const { result } = renderStudySession();
 
     const end = Date.now();
@@ -277,7 +292,7 @@ describe('useStudySession study records', () => {
     // Another tab's mount recovery committed the parked unlabeled twin; the
     // answered save then collides on the same batch id. The time is on the
     // server exactly once — only the label could not be attached.
-    supabaseMock.rpc.mockResolvedValueOnce(rpcConflictError());
+    supabaseMock.rpcResult.mockResolvedValueOnce(rpcConflictError());
     const { result } = renderStudySession();
 
     const end = Date.now();
@@ -298,7 +313,7 @@ describe('useStudySession study records', () => {
   });
 
   it('parks the draft as invalid on a permanent validation error', async () => {
-    supabaseMock.rpc.mockResolvedValueOnce(rpcValidationError());
+    supabaseMock.rpcResult.mockResolvedValueOnce(rpcValidationError());
     const { result } = renderStudySession();
 
     const end = Date.now();
@@ -381,7 +396,7 @@ describe('useStudySession study records', () => {
     };
 
     it('flushes an orphaned draft through the recording RPC and clears it on saved', async () => {
-      supabaseMock.rpc.mockResolvedValue(rpcOk('saved', 120));
+      supabaseMock.rpcResult.mockResolvedValue(rpcOk('saved', 120));
       seedDraftV2('draft-recover-1', 'user-1');
 
       renderStudySession();
@@ -398,7 +413,7 @@ describe('useStudySession study records', () => {
     it('drops a draft without a duplicate toast when the server says already_processed', async () => {
       // The original save landed but the response was lost before the draft
       // was cleared: the server, not a client-side SELECT, proves it.
-      supabaseMock.rpc.mockResolvedValue(rpcOk('already_processed', 120));
+      supabaseMock.rpcResult.mockResolvedValue(rpcOk('already_processed', 120));
       seedDraftV2('draft-already-saved', 'user-1');
 
       renderStudySession();
@@ -411,7 +426,7 @@ describe('useStudySession study records', () => {
     });
 
     it('converts a legacy v1 draft into the v2 RPC payload without sending user_id', async () => {
-      supabaseMock.rpc.mockResolvedValue(rpcOk('saved', 120));
+      supabaseMock.rpcResult.mockResolvedValue(rpcOk('saved', 120));
       const { createdAt } = seedLegacyDraft('draft-v1', 'user-1');
 
       renderStudySession();
@@ -428,7 +443,7 @@ describe('useStudySession study records', () => {
     });
 
     it('converts a pre-migration draft whose batch id only lives in group_id', async () => {
-      supabaseMock.rpc.mockResolvedValue(rpcOk('saved', 120));
+      supabaseMock.rpcResult.mockResolvedValue(rpcOk('saved', 120));
       seedLegacyDraft('draft-legacy-1', 'user-1', 120, 'legacy');
 
       renderStudySession();
@@ -450,6 +465,75 @@ describe('useStudySession study records', () => {
       expect(Object.keys(readOutbox())).toEqual(['draft-foreign']);
     });
 
+    it('stops between drafts on an account switch and recovers them when their owner returns', async () => {
+      const first = seedDraftV2('draft-first', 'user-1');
+      const second = seedDraftV2('draft-second', 'user-1');
+      window.localStorage.setItem(PENDING_SESSIONS_KEY, JSON.stringify({ [first.sessionId]: first, [second.sessionId]: second }));
+      let resolveFirst!: (value: ReturnType<typeof rpcOk>) => void;
+      supabaseMock.rpcResult.mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }));
+      const view = renderStudySession();
+      await act(async () => {});
+      expect(supabaseMock.rpc).toHaveBeenCalledTimes(1);
+
+      window.localStorage.setItem(AUTH_TOKEN_KEY, JSON.stringify({ user: { id: 'user-2' } }));
+      view.rerender(); // Login remains true: the account identity is the dependency.
+      await act(async () => { resolveFirst(rpcOk('saved', 120)); });
+      expect(supabaseMock.rpc).toHaveBeenCalledTimes(1);
+      expect(Object.keys(readOutbox())).toEqual(['draft-second']);
+      expect(onRecordSaved).not.toHaveBeenCalled();
+
+      window.localStorage.setItem(AUTH_TOKEN_KEY, JSON.stringify({ user: { id: 'user-1' } }));
+      view.rerender();
+      await act(async () => {});
+      expect(supabaseMock.rpc).toHaveBeenCalledTimes(2);
+      expect(readOutbox()).toEqual({});
+      expect(supabaseMock.setHeader).toHaveBeenNthCalledWith(2, 'Authorization', 'Bearer token-user-1');
+    });
+
+    it('does not send a draft after cancellation while its session lookup is pending', async () => {
+      seedDraftV2('draft-session-wait', 'user-1');
+      let resolveSession!: (value: unknown) => void;
+      supabaseMock.auth.getSession.mockImplementationOnce(() => new Promise(resolve => { resolveSession = resolve; }));
+      const view = renderStudySession();
+      await act(async () => {});
+      view.unmount();
+      await act(async () => {
+        resolveSession({ data: { session: { user: { id: 'user-1' }, access_token: 'token-user-1' } }, error: null });
+      });
+      expect(supabaseMock.rpc).not.toHaveBeenCalled();
+      expect(Object.keys(readOutbox())).toEqual(['draft-session-wait']);
+    });
+
+    it('keeps the owner Authorization when the real SDK reads a different account at fetch time', async () => {
+      seedDraftV2('draft-bound-token', 'user-1');
+      const sentHeaders: Headers[] = [];
+      let sendingRecord = false;
+      const client = createClient('https://record-test.supabase.co', 'anon-test-key', {
+        accessToken: async () => {
+          if (sendingRecord) window.localStorage.setItem(AUTH_TOKEN_KEY, JSON.stringify({ user: { id: 'user-2' } }));
+          return 'token-user-2';
+        },
+        global: {
+          fetch: async (_input, init) => {
+            sentHeaders.push(new Headers(init?.headers));
+            return new Response(JSON.stringify({ status: 'saved', total_seconds: 120 }), {
+              status: 200, headers: { 'Content-Type': 'application/json' },
+            });
+          },
+        },
+      });
+      supabaseMock.rpc.mockImplementation((name: string, params: RpcParams) => {
+        sendingRecord = true;
+        return client.rpc(name, params);
+      });
+      renderStudySession();
+      await act(async () => {});
+      expect(sentHeaders).toHaveLength(1);
+      expect(sentHeaders[0].get('Authorization')).toBe('Bearer token-user-1');
+      expect(readOutbox()).toEqual({});
+      expect(onRecordSaved).not.toHaveBeenCalled();
+    });
+
     it('keeps an unconvertible draft instead of silently discarding it', async () => {
       window.localStorage.setItem(
         PENDING_SESSIONS_KEY,
@@ -464,7 +548,7 @@ describe('useStudySession study records', () => {
     });
 
     it('keeps the draft for the next mount when recovery hits a network error', async () => {
-      supabaseMock.rpc.mockResolvedValue(rpcNetworkError());
+      supabaseMock.rpcResult.mockResolvedValue(rpcNetworkError());
       seedDraftV2('draft-retry-later', 'user-1');
 
       renderStudySession();
@@ -477,7 +561,7 @@ describe('useStudySession study records', () => {
     });
 
     it('flags a conflicted labeled draft during recovery and never auto-resends it', async () => {
-      supabaseMock.rpc.mockResolvedValue(rpcConflictError());
+      supabaseMock.rpcResult.mockResolvedValue(rpcConflictError());
       seedDraftV2('draft-conflict', 'user-1', 120, undefined, '수학');
 
       const first = renderStudySession();
@@ -498,7 +582,7 @@ describe('useStudySession study records', () => {
       // before the parked unlabeled twin was cleaned up. The conflict proves
       // the content is on the server; keeping the twin flagged forever would
       // just accumulate zombie drafts.
-      supabaseMock.rpc.mockResolvedValue(rpcConflictError());
+      supabaseMock.rpcResult.mockResolvedValue(rpcConflictError());
       seedDraftV2('draft-labeled-twin', 'user-1');
 
       renderStudySession();
@@ -511,7 +595,7 @@ describe('useStudySession study records', () => {
     it('sends a shared draft exactly once when two hook instances recover concurrently', async () => {
       // StrictMode double-mount / two components: the in-flight guard plus the
       // server idempotency contract mean the draft is recorded exactly once.
-      supabaseMock.rpc.mockResolvedValue(rpcOk('saved', 120));
+      supabaseMock.rpcResult.mockResolvedValue(rpcOk('saved', 120));
       seedDraftV2('draft-strict-mode', 'user-1');
 
       renderStudySession();
@@ -521,6 +605,16 @@ describe('useStudySession study records', () => {
       expect(supabaseMock.rpc).toHaveBeenCalledTimes(1);
       const params = supabaseMock.rpc.mock.calls[0][1] as RpcParams;
       expect(params.p_batch_id).toBe('draft-strict-mode');
+      expect(readOutbox()).toEqual({});
+    });
+
+    it('recovers a draft after StrictMode cancels the first effect setup', async () => {
+      seedDraftV2('draft-strict-remount', 'user-1');
+      renderHook(() => useStudySession({ isLoggedIn: true, onRecordSaved, selectedTaskTitle: '' }), {
+        wrapper: StrictMode,
+      });
+      await act(async () => {});
+      expect(supabaseMock.rpc).toHaveBeenCalledTimes(1);
       expect(readOutbox()).toEqual({});
     });
   });
