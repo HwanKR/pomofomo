@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
 type OwnedGroup = { id: string; name: string };
-type MemberRow = { group_id: string; user_id: string };
 type StorageObject = {
   metadata?: Record<string, unknown> | null;
   name: string;
@@ -11,9 +10,9 @@ type StorageObject = {
 };
 
 type MockClientOverrides = {
-  ownedGroups?: OwnedGroup[];
-  memberRows?: MemberRow[];
-  profileDeleteError?: unknown;
+  blockedGroups?: OwnedGroup[];
+  groupCleanupError?: unknown;
+  authDeleteFailures?: number;
   authGetUserError?: unknown;
   storageListErrorAtCall?: number;
   storagePages?: StorageObject[][];
@@ -41,11 +40,23 @@ function makeOpaqueServiceRoleKey() {
 function createMockClient(overrides: MockClientOverrides = {}) {
   let storageListCallCount = 0;
   let storageRemoveCallCount = 0;
+  let authDeleteCallCount = 0;
   const state = {
+    profileExists: true,
+    authUserExists: true,
     deleteEqCalls: [] as Array<{ table: string; column: string; value: unknown }>,
     deleteInCalls: [] as Array<{ table: string; column: string; values: unknown[] }>,
     profileDeleteCalls: [] as Array<{ table: string; column: string; value: unknown }>,
-    deleteUserMock: vi.fn(async () => ({ error: null })),
+    deleteUserMock: vi.fn(async () => {
+      authDeleteCallCount += 1;
+      if (authDeleteCallCount <= (overrides.authDeleteFailures ?? 0)) {
+        return { error: { message: 'temporary Auth failure' } };
+      }
+      // Auth commits the user deletion and its profile FK cascade together.
+      state.authUserExists = false;
+      state.profileExists = false;
+      return { error: null };
+    }),
     storageListCalls: [] as Array<{ path?: string; options?: Record<string, unknown> }>,
     storageListMock: vi.fn(async (path?: string, options?: Record<string, unknown>) => {
       storageListCallCount += 1;
@@ -70,9 +81,15 @@ function createMockClient(overrides: MockClientOverrides = {}) {
   };
 
   const client = {
+    rpc: vi.fn(async () => ({
+      data: overrides.groupCleanupError ? null : overrides.blockedGroups?.length
+        ? { status: 'leader', groups: overrides.blockedGroups }
+        : { status: 'ready' },
+      error: overrides.groupCleanupError ?? null,
+    })),
     auth: {
       getUser: vi.fn(async () => ({
-        data: { user: overrides.authGetUserError ? null : { id: 'user-1' } },
+        data: { user: overrides.authGetUserError || !state.authUserExists ? null : { id: 'user-1' } },
         error: overrides.authGetUserError ?? null,
       })),
       admin: {
@@ -93,25 +110,19 @@ function createMockClient(overrides: MockClientOverrides = {}) {
         }),
         eq: vi.fn(async (column: string, value: unknown) => {
           if (mode === 'select') {
-            if (table === 'groups') {
-              return { data: overrides.ownedGroups ?? [], error: null };
-            }
             throw new Error(`Unexpected select().eq() for table ${table}`);
           }
 
           if (table === 'profiles') {
             state.profileDeleteCalls.push({ table, column, value });
-            return { error: overrides.profileDeleteError ?? null };
+            state.profileExists = false;
+            return { error: null };
           }
 
           state.deleteEqCalls.push({ table, column, value });
           return { error: null };
         }),
         in: vi.fn(async (column: string, values: unknown[]) => {
-          if (mode === 'select' && table === 'group_members') {
-            return { data: overrides.memberRows ?? [], error: null };
-          }
-
           if (mode === 'delete') {
             state.deleteInCalls.push({ table, column, values });
             return { error: null };
@@ -200,8 +211,7 @@ describe('account-delete route', () => {
 
   it('returns 409 when the user leads a group with other members', async () => {
     const { client } = createMockClient({
-      ownedGroups: [{ id: 'group-1', name: 'Study Group' }],
-      memberRows: [{ group_id: 'group-1', user_id: 'other-user' }],
+      blockedGroups: [{ id: 'group-1', name: 'Study Group' }],
     });
     const { POST } = await loadPostHandler(client);
 
@@ -329,9 +339,9 @@ describe('account-delete route', () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ success: true });
 
-    expect(state.profileDeleteCalls).toEqual([
-      { table: 'profiles', column: 'id', value: 'user-1' },
-    ]);
+    expect(state.profileDeleteCalls).toEqual([]);
+    expect(client.rpc).toHaveBeenCalledWith('cleanup_account_groups', { p_user_id: 'user-1' });
+    expect(state.deleteInCalls).toEqual([]);
     expect(state.deleteUserMock).toHaveBeenCalledWith('user-1');
     expect(state.storageListCalls).toEqual([
       {
@@ -400,5 +410,43 @@ describe('account-delete route', () => {
     expect(state.deleteEqCalls).toEqual([]);
     expect(state.profileDeleteCalls).toEqual([]);
     expect(state.deleteUserMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the profile after an Auth deletion failure and allows a safe retry', async () => {
+    const { client, state } = createMockClient({ authDeleteFailures: 1 });
+    const { POST } = await loadPostHandler(client);
+    const request = () => new NextRequest('http://localhost/api/account-delete', {
+      method: 'POST',
+      headers: { authorization: 'Bearer valid-token' },
+    });
+
+    expect((await POST(request())).status).toBe(500);
+    expect(state.authUserExists).toBe(true);
+    expect(state.profileExists).toBe(true);
+    expect(state.profileDeleteCalls).toEqual([]);
+
+    expect((await POST(request())).status).toBe(200);
+    expect(state.deleteUserMock).toHaveBeenCalledTimes(2);
+    expect(state.authUserExists).toBe(false);
+    expect(state.profileExists).toBe(false);
+    expect(state.profileDeleteCalls).toEqual([]);
+  });
+
+  it('stops before storage and account deletion when atomic group cleanup fails', async () => {
+    const { client, state } = createMockClient({
+      groupCleanupError: { message: 'group delete failed' },
+    });
+    const { POST } = await loadPostHandler(client);
+    const response = await POST(new NextRequest('http://localhost/api/account-delete', {
+      method: 'POST',
+      headers: { authorization: 'Bearer valid-token' },
+    }));
+
+    expect(response.status).toBe(500);
+    expect(state.deleteInCalls).toEqual([]);
+    expect(state.deleteEqCalls).toEqual([]);
+    expect(state.storageListMock).not.toHaveBeenCalled();
+    expect(state.deleteUserMock).not.toHaveBeenCalled();
+    expect(state.profileExists).toBe(true);
   });
 });

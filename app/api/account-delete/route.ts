@@ -158,85 +158,27 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid auth token' }, { status: 401 });
   }
 
-  const { data: ownedGroups, error: ownedGroupsError } = await supabaseAdmin
-    .from('groups')
-    .select('id, name')
-    .eq('leader_id', user.id);
+  const { data: groupCleanup, error: groupCleanupError } = await supabaseAdmin
+    .rpc('cleanup_account_groups', { p_user_id: user.id });
 
-  if (ownedGroupsError) {
-    console.error('Failed to check owned groups:', ownedGroupsError);
+  if (groupCleanupError || !groupCleanup ||
+      !['ready', 'leader'].includes(groupCleanup.status)) {
+    console.error('Failed to clean up account groups:', groupCleanupError);
     return NextResponse.json(
-      { error: 'Failed to check groups' },
+      { error: 'Failed to clean up groups' },
       { status: 500 }
     );
   }
 
-  if (ownedGroups && ownedGroups.length > 0) {
-    const ownedGroupIds = ownedGroups.map((group) => group.id);
-    const { data: memberRows, error: memberRowsError } = await supabaseAdmin
-      .from('group_members')
-      .select('group_id, user_id')
-      .in('group_id', ownedGroupIds);
-
-    if (memberRowsError) {
-      console.error('Failed to check group members:', memberRowsError);
-      return NextResponse.json(
-        { error: 'Failed to check group members' },
-        { status: 500 }
-      );
-    }
-
-    const groupsWithOtherMembers = new Set<string>();
-    (memberRows ?? []).forEach((row) => {
-      if (row.user_id !== user.id) {
-        groupsWithOtherMembers.add(row.group_id);
-      }
-    });
-
-    const blockedGroups = ownedGroups.filter((group) =>
-      groupsWithOtherMembers.has(group.id)
+  if (groupCleanup.status === 'leader') {
+    return NextResponse.json(
+      {
+        error: 'leader',
+        message: 'Group leaders must transfer ownership before deleting the account.',
+        groups: groupCleanup.groups,
+      },
+      { status: 409 }
     );
-    const soloGroups = ownedGroups.filter(
-      (group) => !groupsWithOtherMembers.has(group.id)
-    );
-
-    if (blockedGroups.length > 0) {
-      return NextResponse.json(
-        {
-          error: 'leader',
-          message: 'Group leaders must transfer ownership before deleting the account.',
-          groups: blockedGroups,
-        },
-        { status: 409 }
-      );
-    }
-
-    if (soloGroups.length > 0) {
-      const soloGroupIds = soloGroups.map((group) => group.id);
-      const { error: deleteMembersError } = await supabaseAdmin
-        .from('group_members')
-        .delete()
-        .in('group_id', soloGroupIds);
-      if (deleteMembersError) {
-        console.error('Failed to delete solo group members:', deleteMembersError);
-        return NextResponse.json(
-          { error: 'Failed to delete solo group members' },
-          { status: 500 }
-        );
-      }
-
-      const { error: deleteGroupsError } = await supabaseAdmin
-        .from('groups')
-        .delete()
-        .in('id', soloGroupIds);
-      if (deleteGroupsError) {
-        console.error('Failed to delete solo groups:', deleteGroupsError);
-        return NextResponse.json(
-          { error: 'Failed to delete solo groups' },
-          { status: 500 }
-        );
-      }
-    }
   }
 
   const storageCleanup = await cleanupUserFeedbackStorage({
@@ -290,12 +232,8 @@ export async function POST(request: NextRequest) {
     await deleteByUserId('timer_states');
     await deleteByUserId('push_subscriptions');
 
-    const { error: profileDeleteError } = await supabaseAdmin
-      .from('profiles')
-      .delete()
-      .eq('id', user.id);
-    if (profileDeleteError) throw profileDeleteError;
-
+    // profiles.id references auth.users(id) ON DELETE CASCADE. Keep the profile
+    // until Auth commits deletion so a transient Auth failure remains retryable.
     const { error: authDeleteError } = await supabaseAdmin.auth.admin.deleteUser(user.id);
     if (authDeleteError) throw authDeleteError;
   } catch (error) {
